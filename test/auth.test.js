@@ -36,8 +36,8 @@ test('auth and signed URLs', async t => {
     assert.equal(v.mime, 'video/mp4');
     assert.equal(v.duration, 60);
     assert.ok(v.size > 19e6);
-    assert.match(v.streamUrl, /^\/stream\/1\?exp=\d+&u=student1&sig=/);
-    assert.match(v.thumbUrl, /^\/thumb\/1\?exp=/);
+    assert.match(v.streamUrl, /^http:\/\/127\.0\.0\.1:\d+\/stream\/1\?exp=\d+&u=student1&sig=/);
+    assert.match(v.thumbUrl, /^http:\/\/127\.0\.0\.1:\d+\/thumb\/1\?exp=/);
     const th = await get(s.port, v.thumbUrl);
     assert.equal(th.status, 200);
     assert.equal(th.headers['content-type'], 'image/jpeg');

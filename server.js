@@ -49,7 +49,7 @@ async function main() {
     log.warn('SIGNING_SECRET is missing or shorter than 32 characters: using a random one for this run (signed links break on restart). Set SIGNING_SECRET.');
   }
   if (config.authMode === 'firebase' && !config.firebaseProjectId) log.warn('FIREBASE_PROJECT_ID is not set: user tokens cannot be verified.');
-  const auth = new Auth({ mode: config.authMode, projectId: config.firebaseProjectId, signSecret: config.signSecret, signTtlSec: config.signTtlSec, log });
+  const auth = new Auth({ mode: config.authMode, projectId: config.firebaseProjectId, signSecret: config.signSecret, signTtlSec: config.signTtlSec, appKey: config.appKey, log });
 
   let source; let switcher = null;
   if (config.source === 'mock') {

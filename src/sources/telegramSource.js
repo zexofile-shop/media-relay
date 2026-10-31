@@ -31,7 +31,7 @@ function messageToMeta(msg) {
   if (!mime.startsWith('video/') && !video) return null;
   const text = (msg.message || '').trim();
   const fileName = fname ? fname.fileName : null;
-  const title = (text.split('\n')[0] || '').slice(0, 200) || (fileName ? fileName.replace(/\.[^.]+$/, '') : `Video ${msg.id}`);
+  const title = (text.split('\n')[0] || '').slice(0, 200) || (fileName ? fileName.replace(/\.[^.]+$/, '') : `Lecture ${msg.id}`);
   const thumbs = (doc.thumbs || []).filter(t => t.className === 'PhotoSize' || t.className === 'PhotoSizeProgressive');
   return {
     msgId: msg.id,

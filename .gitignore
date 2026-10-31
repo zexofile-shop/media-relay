@@ -6,3 +6,4 @@ cache/
 data/
 sample_videos/
 *.log
+test-output/

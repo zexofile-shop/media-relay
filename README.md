@@ -4,7 +4,7 @@ A small Node.js server that streams video files from a Telegram channel over HTT
 
 - HTTP Range requests (seek / skip forward works in any player)
 - 1 MB chunk cache on disk with LRU eviction (`CACHE_DIR`, `CACHE_MAX_GB`)
-- Users authenticate with a Firebase ID token, or use short-lived HMAC signed URLs
+- The app authenticates with an app key (`X-App-Key`), users with a Firebase ID token; media is served via short-lived HMAC signed URLs
 - Per-IP rate limit
 - Works with a normal Telegram user account (session string); a bot token is an optional fallback
 
@@ -13,12 +13,14 @@ A small Node.js server that streams video files from a Telegram channel over HTT
 | Path | What |
 | --- | --- |
 | `GET /health` | status, including `telegram`: `connected`, `connecting`, `not configured` or `error: ...` |
-| `GET /api/videos` | list of videos in the channel (auth) |
+| `GET /api/videos` | list of videos (auth). Each item: `msgId, title, caption, duration, size, width, height, mime, date, hasThumb` plus absolute signed `streamUrl` / `thumbUrl` valid 6 h. Optional `?q=` filters by caption text |
+| `GET /api/videos/:msgId` | one video, same shape (auth) |
 | `GET /api/sign?msgId=N` | signed stream URL for one video (auth) |
 | `GET /stream/:msgId` | the video, with Range support (auth or signed URL) |
 | `GET /thumb/:msgId` | thumbnail (auth or signed URL) |
 
-Auth: `Authorization: Bearer <Firebase ID token>` (or `?token=`).
+Auth on `/api/*`: header `X-App-Key: <APP_KEY>` (or `?k=`), or `Authorization: Bearer <Firebase ID token>` (or `?token=`).
+`/stream` and `/thumb` need a signed URL (or one of those headers); the bare URL is not downloadable.
 
 ## Settings (environment variables)
 
@@ -29,6 +31,8 @@ Auth: `Authorization: Bearer <Firebase ID token>` (or `?token=`).
 | `CHANNEL_ID` or `CHANNEL_TITLE` | the channel: numeric id (`-100...`) or its exact title (resolved at startup; the id is logged) |
 | `FIREBASE_PROJECT_ID` | Firebase project whose ID tokens are accepted |
 | `SIGNING_SECRET` | random string, 32+ characters, for signed URLs |
+| `APP_KEY` | optional: shared key the app sends as `X-App-Key` to use the API without a user login |
+| `PUBLIC_BASE_URL` | optional: base for signed links (default: the request's host, https behind a proxy) |
 | `CACHE_DIR` | default `/tmp/cache` |
 | `CACHE_MAX_GB` | default `1` |
 | `PORT` | default `8080` (Render sets it) |

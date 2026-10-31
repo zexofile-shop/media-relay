@@ -13,18 +13,41 @@ function createApp({ config, source, cache, auth, log }) {
   let lastForcedRefresh = 0;
   source.onNewPost = () => { listCache = null; }; // new upload in the channel -> refresh list next time
 
-  const base = config.publicBaseUrl || '';
-  const signedUrl = (kind, id, uid) => {
+  // Absolute base for signed links: PUBLIC_BASE_URL if set, else the request's own host
+  // (behind a proxy such as Render: X-Forwarded-Proto / X-Forwarded-Host).
+  function baseFor(req) {
+    if (config.publicBaseUrl) return config.publicBaseUrl;
+    if (!req) return '';
+    const first = v => (v ? String(v).split(',')[0].trim() : '');
+    const xfProto = config.trustProxy ? first(req.headers['x-forwarded-proto']) : '';
+    const xfHost = config.trustProxy ? first(req.headers['x-forwarded-host']) : '';
+    const host = xfHost || first(req.headers['host']);
+    if (!host || !/^[A-Za-z0-9.\-]+(:\d+)?$/.test(host)) return '';
+    const proto = /^https?$/.test(xfProto) ? xfProto : (req.socket && req.socket.encrypted ? 'https' : 'http');
+    return `${proto}://${host}`;
+  }
+  const signedUrl = (kind, id, uid, req) => {
     const s = auth.sign(kind, id, uid);
-    return { url: `${base}/${kind}/${id}?exp=${s.exp}&u=${encodeURIComponent(s.u)}&sig=${s.sig}`, exp: s.exp };
+    return { url: `${baseFor(req)}/${kind}/${id}?exp=${s.exp}&u=${encodeURIComponent(s.u)}&sig=${s.sig}`, exp: s.exp };
   };
-  const publicVideo = (m, uid) => ({
-    msgId: m.msgId, title: m.title, caption: m.caption, fileName: m.fileName,
-    duration: m.duration, width: m.width, height: m.height, size: m.size, mime: m.mime, date: m.date,
-    thumbUrl: m.hasThumb ? signedUrl('thumb', m.msgId, uid).url : null,
-    streamUrl: signedUrl('stream', m.msgId, uid).url,
-    streamUrlExpires: Math.floor(Date.now() / 1000) + auth.signTtlSec,
-  });
+  const titleOf = m => {
+    const first = String(m.caption || '').trim().split('\n')[0].trim();
+    if (first) return first.slice(0, 200);
+    if (m.fileName) return String(m.fileName).replace(/\.[^.]+$/, '');
+    return m.title || `Lecture ${m.msgId}`;
+  };
+  const publicVideo = (m, uid, req) => {
+    const stream = signedUrl('stream', m.msgId, uid, req);
+    return {
+      msgId: m.msgId, title: titleOf(m), caption: m.caption || '', fileName: m.fileName || null,
+      duration: m.duration ?? null, size: m.size, width: m.width ?? null, height: m.height ?? null,
+      mime: m.mime || 'video/mp4', date: m.date ?? null, hasThumb: !!m.hasThumb,
+      streamUrl: stream.url,
+      thumbUrl: m.hasThumb ? signedUrl('thumb', m.msgId, uid, req).url : null,
+      expiresAt: stream.exp,
+      streamUrlExpires: stream.exp,
+    };
+  };
 
   async function getList(force) {
     if (!force && listCache && Date.now() - listCache.at < config.listTtlSec * 1000) return listCache;
@@ -55,7 +78,7 @@ function createApp({ config, source, cache, auth, log }) {
   }
 
   async function requireUser(req, res, url) {
-    const user = await auth.verifyUser(Auth.tokenFrom(req, url));
+    const user = await auth.verifyCaller(req, url);
     if (!user) { send(res, 401, { error: 'login_required' }); return null; }
     return user;
   }
@@ -123,7 +146,7 @@ function createApp({ config, source, cache, auth, log }) {
     const p = url.pathname;
     if (config.corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', config.corsOrigin);
-      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Range');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Range, X-App-Key');
       res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
       if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
     }
@@ -153,14 +176,17 @@ function createApp({ config, source, cache, auth, log }) {
       let force = url.searchParams.get('refresh') === '1' && Date.now() - lastForcedRefresh > 30000;
       if (force) lastForcedRefresh = Date.now();
       const list = await getList(force);
-      return send(res, 200, { count: list.videos.length, listedAt: list.at, videos: list.videos.map(v => publicVideo(v, user.uid)) });
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      let videos = list.videos;
+      if (q) videos = videos.filter(v => `${v.caption || ''}\n${v.title || ''}\n${v.fileName || ''}`.toLowerCase().includes(q));
+      return send(res, 200, { count: videos.length, listedAt: list.at, linkTtlSec: auth.signTtlSec, videos: videos.map(v => publicVideo(v, user.uid, req)) });
     }
 
     if ((m = /^\/api\/videos\/(\d+)$/.exec(p))) {
       const user = await requireUser(req, res, url); if (!user) return;
       const meta = await cache.getMeta(Number(m[1]));
       if (!meta) return send(res, 404, { error: 'not_found' });
-      return send(res, 200, publicVideo(meta, user.uid));
+      return send(res, 200, publicVideo(meta, user.uid, req));
     }
 
     if (p === '/api/sign') {
@@ -169,8 +195,8 @@ function createApp({ config, source, cache, auth, log }) {
       if (!Number.isInteger(id) || id <= 0) return send(res, 400, { error: 'msgId_required' });
       const meta = await cache.getMeta(id);
       if (!meta) return send(res, 404, { error: 'not_found' });
-      const s = signedUrl('stream', id, user.uid);
-      return send(res, 200, { msgId: id, url: s.url, exp: s.exp, thumbUrl: meta.hasThumb ? signedUrl('thumb', id, user.uid).url : null });
+      const s = signedUrl('stream', id, user.uid, req);
+      return send(res, 200, { msgId: id, url: s.url, streamUrl: s.url, exp: s.exp, thumbUrl: meta.hasThumb ? signedUrl('thumb', id, user.uid, req).url : null });
     }
 
     if (p === '/api/stats') {

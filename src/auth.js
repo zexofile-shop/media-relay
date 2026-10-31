@@ -1,10 +1,11 @@
 'use strict';
-// Who may watch: a signed-in app user (Firebase ID token) or a short-lived signed URL.
+// Who may watch: the app (APP_KEY header), a signed-in app user (Firebase ID token), or a short-lived signed URL.
 const crypto = require('crypto');
 
 class Auth {
-  constructor({ mode = 'firebase', projectId, signSecret, signTtlSec = 6 * 3600, verifyIdToken, log }) {
+  constructor({ mode = 'firebase', projectId, signSecret, signTtlSec = 6 * 3600, verifyIdToken, appKey, log }) {
     this.mode = mode;
+    this.appKey = appKey ? String(appKey) : '';
     this.log = log;
     this.signTtlSec = signTtlSec;
     if (!signSecret || signSecret.length < 32) throw new Error('SIGN_SECRET must be at least 32 random characters (run: openssl rand -hex 32)');
@@ -26,6 +27,27 @@ class Auth {
     const m = /^Bearer\s+(.+)$/i.exec(h);
     if (m) return m[1].trim();
     return url.searchParams.get('token') || null;
+  }
+
+  /** App key from header X-App-Key (or query k= when allowQuery). */
+  static appKeyFrom(req, url, allowQuery = true) {
+    const h = req.headers['x-app-key'];
+    if (h) return String(h).trim();
+    return allowQuery ? (url.searchParams.get('k') || null) : null;
+  }
+
+  /** true when APP_KEY is configured and the given key matches it (constant time). */
+  checkAppKey(key) {
+    if (!this.appKey || !key) return false;
+    const a = crypto.createHash('sha256').update(String(key)).digest();
+    const b = crypto.createHash('sha256').update(this.appKey).digest();
+    return crypto.timingSafeEqual(a, b);
+  }
+
+  /** A caller of the API: the app (APP_KEY) or a signed-in user (Firebase ID token). */
+  async verifyCaller(req, url) {
+    if (this.checkAppKey(Auth.appKeyFrom(req, url, true))) return { uid: 'app', email: null };
+    return this.verifyUser(Auth.tokenFrom(req, url));
   }
 
   async verifyUser(token) {
@@ -69,12 +91,14 @@ class Auth {
     return 'ok';
   }
 
-  /** For /stream and /thumb: a valid signed URL OR a Firebase token. */
+  /** For /stream and /thumb: a valid signed URL, OR an X-App-Key header, OR a Firebase token. */
   async allowMedia(kind, id, req, url) {
     const s = this.checkSigned(kind, id, url);
     if (s === 'ok') return { ok: true, uid: url.searchParams.get('u') || null };
     if (s === 'expired') return { ok: false, status: 403, error: 'link_expired' };
     if (s === 'bad') return { ok: false, status: 403, error: 'bad_signature' };
+    // header only for media: a key in the query string would make a shareable bare URL
+    if (this.checkAppKey(Auth.appKeyFrom(req, url, false))) return { ok: true, uid: 'app' };
     const user = await this.verifyUser(Auth.tokenFrom(req, url));
     if (user) return { ok: true, uid: user.uid };
     return { ok: false, status: 401, error: 'login_required' };

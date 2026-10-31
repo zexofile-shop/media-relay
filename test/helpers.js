@@ -24,9 +24,9 @@ async function startServer(opts = {}) {
   const source = opts.source || new MockSource({ dir: VIDEO_DIR, delayMs: opts.delayMs || 0 });
   const cache = new ChunkCache({ dir, maxBytes: opts.maxBytes || 10 * 1024 ** 3, source, log, readAhead: opts.readAhead ?? 0,
     concurrency: opts.concurrency || 3, sleep: opts.sleep });
-  const auth = new Auth({ mode: opts.authMode || 'firebase', signSecret: SECRET, signTtlSec: opts.signTtlSec || 6 * 3600, log,
+  const auth = new Auth({ mode: opts.authMode || 'firebase', signSecret: SECRET, signTtlSec: opts.signTtlSec || 6 * 3600, log, appKey: opts.appKey,
     verifyIdToken: async t => { if (t === 'good-token') return { uid: 'student1', email: 's@x.com', exp: Date.now() / 1000 + 3600 }; throw new Error('auth/argument-error'); } });
-  const config = { publicBaseUrl: '', trustProxy: true, rateLimitPerMin: opts.rateLimitPerMin || 0, listTtlSec: 300, corsOrigin: '', adminKey: 'adm' };
+  const config = { publicBaseUrl: opts.publicBaseUrl || '', trustProxy: true, rateLimitPerMin: opts.rateLimitPerMin || 0, listTtlSec: 300, corsOrigin: '', adminKey: 'adm' };
   const server = createApp({ config, source, cache, auth, log });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
@@ -37,6 +37,7 @@ async function startServer(opts = {}) {
 }
 
 function get(port, p, headers = {}, method = 'GET') {
+  if (/^https?:\/\//.test(p)) { const u = new URL(p); p = u.pathname + u.search; }
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: p, method, headers, agent: false }, res => {
       const bufs = [];

@@ -59,6 +59,7 @@ function loadConfig(overrides = {}) {
     firebaseProjectId: str('FIREBASE_PROJECT_ID'),
     signSecret: str('SIGNING_SECRET', str('SIGN_SECRET')),
     signTtlSec: num('SIGN_TTL_SEC', 6 * 3600),
+    appKey: str('APP_KEY'),
     adminKey: str('ADMIN_KEY'),
     corsOrigin: str('CORS_ORIGIN', ''),
     rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 600),
