@@ -13,7 +13,7 @@ function createApp({ config, source, cache, auth, log, push, uploads }) {
     channelId: config.pushChannelId, ratePerMin: config.pushRatePerMin ?? 20, log });
   const adminOrigins = parseOrigins(config.adminOrigins);
   const uploadService = uploads || new UploadService({ token: config.uploadToken, repo: config.uploadRepo, pdfTag: config.uploadReleasePdf,
-    videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, workflowRef: config.uploadWorkflowRef,
+    videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, workflowRef: config.uploadWorkflowRef, partsTag: config.uploadReleaseParts,
     ownerEmail: config.ownerEmail, projectId: config.firebaseProjectId, push: pushService, log });
   const started = Date.now();
   let listCache = null; // { at, videos }
