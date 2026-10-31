@@ -109,6 +109,7 @@ jobs:
       - name: Encode 720p, 480p, 360p (one decode)
         if: inputs.qualities != '0' && endsWith(inputs.name, '.mp4')
         run: |
+          mkdir -p out
           base="${NAME%.mp4}"
           H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 src/"$NAME" | head -1)
           AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 src/"$NAME" | head -1)
