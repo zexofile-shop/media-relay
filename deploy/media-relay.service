@@ -1,0 +1,19 @@
+# systemd unit (optional, for a VPS)
+#   sudo cp deploy/media-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now media-relay
+[Unit]
+Description=media-relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/media-relay
+EnvironmentFile=/opt/media-relay/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

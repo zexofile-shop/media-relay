@@ -1,0 +1,26 @@
+{
+  "name": "media-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stream videos from a Telegram channel over HTTP with Range support and a chunk cache",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "login": "node login.js",
+    "test": "node --test test/*.test.js",
+    "make-sample": "bash tools/make-sample.sh",
+    "probe": "node tools/probe-test.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "firebase-admin": "^14.5.0",
+    "telegram": "^2.26.22"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^13.0.3"
+  }
+}

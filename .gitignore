@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+node_modules/
+cache/
+data/
+sample_videos/
+*.log

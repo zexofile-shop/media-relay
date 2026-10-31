@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: media-relay
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: TG_SESSION
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: CHANNEL_TITLE
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: SIGNING_SECRET
+        sync: false
+      - key: CACHE_DIR
+        value: /tmp/cache
+      - key: CACHE_MAX_GB
+        value: "1"
