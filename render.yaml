@@ -34,6 +34,16 @@ services:
         sync: false
       - key: PUSH_CHANNEL_ID
         sync: false
+      - key: GITHUB_UPLOAD_TOKEN
+        sync: false
+      - key: UPLOAD_REPO
+        sync: false
+      - key: UPLOAD_RELEASE_PDF
+        sync: false
+      - key: UPLOAD_RELEASE_VIDEO
+        sync: false
+      - key: UPLOAD_QUALITY_WORKFLOW
+        sync: false
       - key: CACHE_DIR
         value: /tmp/cache
       - key: CACHE_MAX_GB
