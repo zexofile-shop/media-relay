@@ -70,6 +70,14 @@ function loadConfig(overrides = {}) {
     adminOrigins: str('ADMIN_ORIGINS'), // comma list of origins allowed to call /api/push from a browser
     pushChannelId: str('PUSH_CHANNEL_ID'),
     pushRatePerMin: num('PUSH_RATE_PER_MIN', 20),
+
+    // admin uploads (/api/upload): files go into GitHub release assets
+    uploadToken: str('GITHUB_UPLOAD_TOKEN'),          // fine-grained token: Contents (and Actions) read/write on UPLOAD_REPO only
+    uploadRepo: str('UPLOAD_REPO'),                   // owner/name
+    uploadReleasePdf: str('UPLOAD_RELEASE_PDF'),      // release tag for PDFs (created if missing)
+    uploadReleaseVideo: str('UPLOAD_RELEASE_VIDEO'),  // release tag for videos (created if missing)
+    uploadQualityWorkflow: str('UPLOAD_QUALITY_WORKFLOW'), // workflow file in UPLOAD_REPO that makes 720p/480p/360p copies
+    uploadWorkflowRef: str('UPLOAD_WORKFLOW_REF', 'main'),
   };
   return Object.assign(cfg, overrides);
 }
