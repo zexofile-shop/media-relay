@@ -18,6 +18,7 @@ A small Node.js server that streams video files from a Telegram channel over HTT
 | `GET /api/sign?msgId=N` | signed stream URL for one video (auth) |
 | `GET /stream/:msgId` | the video, with Range support (auth or signed URL) |
 | `GET /thumb/:msgId` | thumbnail (auth or signed URL) |
+| `POST /api/push` | send a push notification to an FCM topic (admins only, see below) |
 
 Auth on `/api/*`: header `X-App-Key: <APP_KEY>` (or `?k=`), or `Authorization: Bearer <Firebase ID token>` (or `?token=`).
 `/stream` and `/thumb` need a signed URL (or one of those headers); the bare URL is not downloadable.
@@ -37,8 +38,29 @@ Auth on `/api/*`: header `X-App-Key: <APP_KEY>` (or `?k=`), or `Authorization: B
 | `CACHE_MAX_GB` | default `1` |
 | `PORT` | default `8080` (Render sets it) |
 | `RATE_LIMIT_PER_MIN` | default `600` per IP |
+| `FCM_SERVICE_ACCOUNT` | push: the Firebase service-account key JSON (or base64 of it). Unset = `/api/push` answers 503 `push_not_configured` |
+| `OWNER_EMAIL` | push: this signed-in email is always allowed to send |
+| `ADMIN_ORIGINS` | push: comma list of browser origins allowed to call `/api/push` (CORS) |
+| `PUSH_CHANNEL_ID` | push: Android notification channel id set on each message |
+| `PUSH_RATE_PER_MIN` | push: sends per user per minute, default `20` |
 
 The account must be a member of the channel. Keep `TG_SESSION` secret: it gives full access to the account.
+
+## Push notifications
+
+`POST /api/push` with `Authorization: Bearer <Firebase ID token>` and a JSON body:
+
+```
+{ "title": "max 100 chars", "body": "max 500 chars", "topic": "all" | "class_1" ... "class_12",
+  "data": { "open": "..." },            // optional, string values only
+  "image": "https://..." }               // optional
+```
+
+The caller must be an admin: their email equals `OWNER_EMAIL`, or the Firestore document `admins/{email}` exists.
+The server reads Firestore and sends through FCM HTTP v1 with OAuth tokens minted from `FCM_SERVICE_ACCOUNT`
+(scopes `firebase.messaging` and `datastore`, cached ~50 min). Android priority is high.
+Answers `{ "ok": true, "messageId": "projects/.../messages/..." }` or `{ "ok": false, "error": "..." }`
+(401 `login_required`, 403 `not_admin`, 400 validation, 429 rate limit, 503 `push_not_configured`, 502 FCM error).
 
 ## Deploy on Render
 

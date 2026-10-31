@@ -63,6 +63,13 @@ function loadConfig(overrides = {}) {
     adminKey: str('ADMIN_KEY'),
     corsOrigin: str('CORS_ORIGIN', ''),
     rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 600),
+
+    // push notifications (POST /api/push)
+    fcmServiceAccount: str('FCM_SERVICE_ACCOUNT'), // service-account JSON, or base64 of it; unset = push disabled
+    ownerEmail: str('OWNER_EMAIL'),
+    adminOrigins: str('ADMIN_ORIGINS'), // comma list of origins allowed to call /api/push from a browser
+    pushChannelId: str('PUSH_CHANNEL_ID'),
+    pushRatePerMin: num('PUSH_RATE_PER_MIN', 20),
   };
   return Object.assign(cfg, overrides);
 }

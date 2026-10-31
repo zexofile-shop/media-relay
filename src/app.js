@@ -1,12 +1,16 @@
 'use strict';
-// HTTP layer: /health, /api/videos, /api/sign, /stream/:msgId (Range), /thumb/:msgId, /api/stats
+// HTTP layer: /health, /api/videos, /api/sign, /stream/:msgId (Range), /thumb/:msgId, /api/stats, POST /api/push
 const http = require('http');
 const { parseRange } = require('./range');
 const { Auth, RateLimiter } = require('./auth');
 const { CHUNK_SIZE } = require('./chunkCache');
+const { PushService, handlePush, parseOrigins } = require('./push');
 
-function createApp({ config, source, cache, auth, log }) {
+function createApp({ config, source, cache, auth, log, push }) {
   const limiter = new RateLimiter(config.rateLimitPerMin);
+  const pushService = push || new PushService({ serviceAccount: config.fcmServiceAccount, ownerEmail: config.ownerEmail,
+    channelId: config.pushChannelId, ratePerMin: config.pushRatePerMin ?? 20, log });
+  const adminOrigins = parseOrigins(config.adminOrigins);
   const started = Date.now();
   let listCache = null; // { at, videos }
   let listInflight = null;
@@ -144,6 +148,10 @@ function createApp({ config, source, cache, auth, log }) {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://local');
     const p = url.pathname;
+    if (p === '/api/push') {
+      if (req.method !== 'OPTIONS' && !limiter.allow(clientIp(req))) return send(res, 429, { ok: false, error: 'too_many_requests' }, { 'Retry-After': '60' });
+      return handlePush(req, res, { push: pushService, auth, adminOrigins, send, log });
+    }
     if (config.corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', config.corsOrigin);
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Range, X-App-Key');

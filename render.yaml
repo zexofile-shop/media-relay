@@ -26,6 +26,14 @@ services:
         sync: false
       - key: APP_KEY
         sync: false
+      - key: FCM_SERVICE_ACCOUNT
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: ADMIN_ORIGINS
+        sync: false
+      - key: PUSH_CHANNEL_ID
+        sync: false
       - key: CACHE_DIR
         value: /tmp/cache
       - key: CACHE_MAX_GB

@@ -58,7 +58,7 @@ class Auth {
     if (hit && hit.until > Date.now()) return hit;
     try {
       const d = await this._verify(token);
-      const user = { uid: d.uid || d.sub, email: d.email || null, until: Math.min((d.exp || 0) * 1000, Date.now() + 5 * 60 * 1000) };
+      const user = { uid: d.uid || d.sub, email: d.email || null, emailVerified: d.email_verified !== false, until: Math.min((d.exp || 0) * 1000, Date.now() + 5 * 60 * 1000) };
       if (this.tokenCache.size > 5000) this.tokenCache.clear();
       this.tokenCache.set(key, user);
       return user;
