@@ -320,7 +320,7 @@ test('upload: a chunk bigger than the chunk size is refused', async () => {
 
 test('upload: memory stays bounded while a large file streams (backpressure)', async () => {
   const gh = fakeGitHub();
-  const s = await startServer({ uploads: makeUploads(gh, { chunkSize: 8 * 1024 * 1024 }) });
+  const s = await startServer({ uploads: makeUploads(gh, { chunkSize: 8 * 1024 * 1024, directMax: 1e12 }) });
   try {
     const size = 64 * 1024 * 1024; const C = 8 * 1024 * 1024;
     const st = await request(s.port, '/api/upload/start', { method: 'POST', headers: auth('owner-token'), body: { kind: 'video', name: 'big', size, type: 'video/mp4' } });
@@ -375,5 +375,119 @@ test('upload: quality dispatch refused by GitHub says the token lacks Actions pe
   try {
     const r = await request(s.port, '/api/upload/qualities', { method: 'POST', headers: auth('owner-token'), body: { name: 'Lec.mp4' } });
     assert.strictEqual(r.status, 502); assert.strictEqual(r.json.error, 'github_actions_permission');
+  } finally { await s.close(); }
+});
+
+test('upload parts mode: big file goes up as part assets, then the workflow joins them', async () => {
+  const gh = fakeGitHub({ releases: { 'books-up': 11, 'lectures-v1': 12 } });
+  const up = makeUploads(gh, { partSize: 200 * 1024, directMax: 300 * 1024 });
+  const s = await startServer({ uploads: up });
+  try {
+    const file = MP4(700 * 1024); const P = 200 * 1024;
+    const st = await request(s.port, '/api/upload/start', { method: 'POST', headers: auth('owner-token'), body: { kind: 'video', name: 'Big Lecture', size: file.length, type: 'video/mp4' } });
+    assert.strictEqual(st.json.mode, 'parts'); assert.strictEqual(st.json.chunkSize, P);
+    const id = st.json.id;
+    // a part of the wrong length is refused
+    let r = await put(s.port, `/api/upload/chunk?id=${id}&offset=0`, file.subarray(0, 1000), auth('owner-token'));
+    assert.strictEqual(r.status, 400); assert.strictEqual(r.json.error, 'bad_chunk_length');
+    let off = 0;
+    while (off < file.length) {
+      r = await put(s.port, `/api/upload/chunk?id=${id}&offset=${off}`, file.subarray(off, off + P), auth('owner-token'));
+      assert.strictEqual(r.status, 200);
+      off = r.json.received;
+    }
+    assert.strictEqual(r.json.assembling, true); assert.strictEqual(r.json.done, false);
+    const parts = gh.st.uploads.filter(u => u.name.endsWith('.part'));
+    assert.strictEqual(parts.length, 4);
+    assert.deepStrictEqual(parts.map(p => p.size), [P, P, P, 700 * 1024 - 3 * P]);
+    assert.ok(parts.every(p => p.name.startsWith(`up-${id}.`)));
+    const joined = crypto.createHash('sha256');
+    // the fake keeps only hashes; check each part's hash against the file's slices instead
+    parts.forEach((p, i) => assert.strictEqual(p.sha, crypto.createHash('sha256').update(file.subarray(i * P, i * P + p.size)).digest('hex')));
+    assert.deepStrictEqual(gh.st.created, ['upload-parts']);
+    assert.strictEqual(gh.st.dispatches.length, 1);
+    assert.deepStrictEqual(gh.st.dispatches[0].inputs, { tag: 'lectures-v1', name: 'Big-Lecture.mp4', parts_tag: 'upload-parts', parts_prefix: `up-${id}`, parts_count: '4', size: String(file.length), qualities: '1' });
+    r = await request(s.port, `/api/upload/status?id=${id}`, { headers: auth('owner-token') });
+    assert.strictEqual(r.json.done, false); assert.strictEqual(r.json.assembling, true);
+    // the workflow finishes: the joined asset appears on the target release
+    gh.st.assets.push({ id: 999, name: 'Big-Lecture.mp4', state: 'uploaded', size: file.length, release: 12, browser_download_url: 'https://github.com/o/r/releases/download/lectures-v1/Big-Lecture.mp4' });
+    up.get(id, 'owner1').checkedAt = 0;
+    r = await request(s.port, `/api/upload/status?id=${id}`, { headers: auth('owner-token') });
+    assert.strictEqual(r.json.done, true);
+    assert.strictEqual(r.json.url, 'https://github.com/o/r/releases/download/lectures-v1/Big-Lecture.mp4');
+    assert.strictEqual(r.json.qualitiesStarted, true);
+  } finally { await s.close(); }
+});
+
+test('upload parts mode: a part GitHub refuses can be sent again; the broken part asset is removed', async () => {
+  const gh = fakeGitHub({ releases: { 'books-up': 11, 'lectures-v1': 12 } });
+  let failNext = true;
+  const real = gh.uploadImpl;
+  const uploadImpl = (url, headers) => {
+    const h = real(url, headers);
+    if (failNext && url.includes('.0001.part')) { failNext = false; const end = h.stream.end.bind(h.stream); h.stream.end = (...a) => { h.abort(); return end(...a); }; }
+    return h;
+  };
+  const up = makeUploads(gh, { partSize: 100 * 1024, directMax: 150 * 1024, uploadImpl });
+  const s = await startServer({ uploads: up });
+  try {
+    const file = PDF(250 * 1024); const P = 100 * 1024;
+    const st = await request(s.port, '/api/upload/start', { method: 'POST', headers: auth('owner-token'), body: { kind: 'pdf', name: 'big.pdf', size: file.length, type: 'application/pdf' } });
+    const id = st.json.id;
+    let r = await put(s.port, `/api/upload/chunk?id=${id}&offset=0`, file.subarray(0, P), auth('owner-token'));
+    assert.strictEqual(r.json.received, P);
+    r = await put(s.port, `/api/upload/chunk?id=${id}&offset=${P}`, file.subarray(P, 2 * P), auth('owner-token'));
+    assert.strictEqual(r.status, 503); assert.strictEqual(r.json.error, 'part_retry'); assert.strictEqual(r.json.received, P);
+    r = await put(s.port, `/api/upload/chunk?id=${id}&offset=${P}`, file.subarray(P, 2 * P), auth('owner-token'));
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.json.received, 2 * P);
+    r = await put(s.port, `/api/upload/chunk?id=${id}&offset=${2 * P}`, file.subarray(2 * P), auth('owner-token'));
+    assert.strictEqual(r.json.assembling, true);
+    assert.strictEqual(gh.st.dispatches[0].inputs.qualities, '0');
+    await new Promise(res => setTimeout(res, 1700));
+    const left = gh.st.assets.filter(a => a.name.endsWith('.0001.part'));
+    assert.strictEqual(left.length, 1, 'only the good copy of part 1 remains');
+    assert.strictEqual(left[0].state, 'uploaded');
+  } finally { await s.close(); }
+});
+
+test('upload parts mode: a failed join run is reported', async () => {
+  const gh = fakeGitHub({ releases: { 'books-up': 11, 'lectures-v1': 12 } });
+  const up = makeUploads(gh, { partSize: 100 * 1024, directMax: 150 * 1024 });
+  const s = await startServer({ uploads: up });
+  try {
+    const file = PDF(200 * 1024); const P = 100 * 1024;
+    const st = await request(s.port, '/api/upload/start', { method: 'POST', headers: auth('owner-token'), body: { kind: 'pdf', name: 'j.pdf', size: file.length, type: 'application/pdf' } });
+    const id = st.json.id;
+    await put(s.port, `/api/upload/chunk?id=${id}&offset=0`, file.subarray(0, P), auth('owner-token'));
+    const r1 = await put(s.port, `/api/upload/chunk?id=${id}&offset=${P}`, file.subarray(P), auth('owner-token'));
+    assert.strictEqual(r1.json.assembling, true);
+    // GitHub reports the run as failed
+    const runsRef = gh.fetchImpl;
+    const fetchImpl = async (url, opts) => /\/runs/.test(url) ? { ok: true, status: 200, text: async () => JSON.stringify({ workflow_runs: [{ display_title: `assemble j.pdf up-${id}`, status: 'completed', conclusion: 'failure', html_url: 'x' }] }) } : runsRef(url, opts);
+    up.gh.fetch = fetchImpl;
+    const r = await request(s.port, `/api/upload/status?id=${id}`, { headers: auth('owner-token') });
+    assert.strictEqual(r.json.ok, false); assert.strictEqual(r.json.error, 'assemble_failed');
+  } finally { await s.close(); }
+});
+
+test('upload import: a direct MP4 link is handed to the workflow, nothing passes through the server', async () => {
+  const gh = fakeGitHub({ releases: { 'books-up': 11, 'lectures-v1': 12 }, existing: [{ name: 'Real-Numbers.mp4', release: 12 }] });
+  const s = await startServer({ uploads: makeUploads(gh) });
+  try {
+    const go = body => request(s.port, '/api/upload/import', { method: 'POST', headers: auth('owner-token'), body });
+    assert.strictEqual((await go({ url: 'http://x.example/a.mp4' })).json.error, 'bad_url');
+    assert.strictEqual((await go({ url: 'not a url' })).json.error, 'bad_url');
+    assert.strictEqual((await go({ url: 'https://github.com/o/r/releases/download/lectures-v1/a.mp4' })).json.error, 'already_on_github');
+    let r = await go({ url: 'https://videos.example/play/Real%20Numbers.mp4' });
+    assert.strictEqual(r.status, 202);
+    assert.strictEqual(r.json.name, 'Real-Numbers-2.mp4');
+    assert.deepStrictEqual(gh.st.dispatches[0].inputs, { tag: 'lectures-v1', name: 'Real-Numbers-2.mp4', source_url: 'https://videos.example/play/Real%20Numbers.mp4', qualities: '1' });
+    assert.strictEqual(gh.st.uploads.length, 0);
+    r = await go({ url: 'https://videos.example/play/Real%20Numbers.mp4' });
+    assert.strictEqual(r.status, 429);
+    r = await request(s.port, '/api/upload/import?name=Real-Numbers.mp4', { headers: auth('owner-token') });
+    assert.strictEqual(r.json.original, 'https://github.com/o/r/releases/download/lectures-v1/Real-Numbers.mp4');
+    r = await request(s.port, '/api/upload/import', { method: 'POST', body: { url: 'https://x/a.mp4' } });
+    assert.strictEqual(r.status, 401);
   } finally { await s.close(); }
 });
