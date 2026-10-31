@@ -32,7 +32,7 @@ async function startServer(opts = {}) {
       throw new Error('auth/argument-error');
     } });
   const config = { publicBaseUrl: opts.publicBaseUrl || '', trustProxy: true, rateLimitPerMin: opts.rateLimitPerMin || 0, listTtlSec: 300, corsOrigin: '', adminKey: 'adm', adminOrigins: opts.adminOrigins || '' };
-  const server = createApp({ config, source, cache, auth, log, push: opts.push });
+  const server = createApp({ config, source, cache, auth, log, push: opts.push, uploads: opts.uploads });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
   return {
