@@ -1,0 +1,58 @@
+name: video-qualities
+run-name: qualities ${{ inputs.name }}
+# Makes 720p / 480p / 360p copies of an MP4 that sits on a release of this repo, and uploads them to the same release
+# as <name>_720p.mp4, <name>_480p.mp4, <name>_360p.mp4 (index first, so players start fast). The original is never touched.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag that holds the video
+        required: true
+      name:
+        description: Asset name of the video (.mp4)
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: qualities-${{ inputs.tag }}-${{ inputs.name }}
+  cancel-in-progress: false
+jobs:
+  copies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      TAG: ${{ inputs.tag }}
+      NAME: ${{ inputs.name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$NAME" =~ ^[A-Za-z0-9._-]{1,140}\.mp4$ ]] || { echo "bad name"; exit 1; }
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "bad tag"; exit 1; }
+      - name: Tools
+        run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Download
+        run: |
+          mkdir -p src out
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$NAME" -D src
+          ls -l src
+          ffprobe -v error -show_entries stream=codec_type,width,height,bit_rate:format=duration,size -of compact src/"$NAME"
+      - name: Encode 720p, 480p, 360p (one decode)
+        run: |
+          base="${NAME%.mp4}"
+          H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 src/"$NAME" | head -1)
+          AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 src/"$NAME" | head -1)
+          h() { if [ -n "$H" ] && [ "$H" -lt "$1" ]; then echo "$H"; else echo "$1"; fi; }  # never upscale
+          AMAP=(); [ -n "$AUDIO" ] && AMAP=(-map 0:a:0)
+          v() { echo "-c:v libx264 -preset veryfast -profile:v main -pix_fmt yuv420p -g 60 -keyint_min 60 -sc_threshold 0 -crf $1 -maxrate $2 -bufsize $3"; }
+          a() { [ -n "$AUDIO" ] && echo "-c:a aac -ac 2 -b:a $1"; }
+          ffmpeg -hide_banner -loglevel warning -stats -y -i src/"$NAME" \
+            -filter_complex "[0:v]split=3[a][b][c];[a]scale=-2:$(h 720)[v720];[b]scale=-2:$(h 480)[v480];[c]scale=-2:$(h 360)[v360]" \
+            -map "[v720]" "${AMAP[@]}" $(v 23 2200k 4400k) $(a 128k) -movflags +faststart out/"${base}_720p.mp4" \
+            -map "[v480]" "${AMAP[@]}" $(v 24 1100k 2200k) $(a 96k) -movflags +faststart out/"${base}_480p.mp4" \
+            -map "[v360]" "${AMAP[@]}" $(v 26 650k 1300k) $(a 64k) -movflags +faststart out/"${base}_360p.mp4"
+          ls -l out
+      - name: Upload copies
+        run: |
+          gh release upload "$TAG" out/*.mp4 -R "$GITHUB_REPOSITORY" --clobber
+          for f in out/*.mp4; do echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$(basename "$f")"; done >> "$GITHUB_STEP_SUMMARY"
