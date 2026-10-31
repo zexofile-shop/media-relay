@@ -8,7 +8,9 @@
 //   DELETE /api/upload/session?id=          cancel
 //   POST   /api/upload?kind=&name=          one-shot: the whole file as the body (curl / small files)
 //   POST   /api/upload/qualities            {name} -> starts the quality-copy workflow for an uploaded video
-//   GET    /api/upload/qualities?name=      {status, urls}
+//   GET    /api/upload/qualities?name=      {status, original, urls}
+//   POST   /api/upload/import               {url, name?} -> a direct MP4 link is copied onto the video release by the workflow
+//   GET    /api/upload/import?name=         same answer as qualities (original appears first, then the copies)
 //
 // Bytes are piped to uploads.github.com as they arrive (one open upstream request per upload with the
 // final Content-Length), so memory stays at one chunk at most whatever the file size.
@@ -140,6 +142,7 @@ class UploadService {
    */
   constructor({ token = '', repo = '', pdfTag = '', videoTag = '', qualityWorkflow = '', workflowRef = 'main', chunkSize = DEFAULT_CHUNK,
     idleMs = 3 * 60 * 1000, maxSessionsPerUser = 2, maxSessions = 4, ownerEmail = '', projectId = '', push = null,
+    partsTag = 'upload-parts', partSize = 16 * 1024 * 1024, directMax = 32 * 1024 * 1024, partsIdleMs = 30 * 60 * 1000,
     fetchImpl = globalThis.fetch, uploadImpl, now = () => Date.now(), log } = {}) {
     this.repo = String(repo || '').trim();
     this.tags = { pdf: String(pdfTag || '').trim(), video: String(videoTag || '').trim() };
@@ -147,6 +150,10 @@ class UploadService {
     this.qualityWorkflow = String(qualityWorkflow || '').trim();
     this.workflowRef = workflowRef || 'main';
     this.chunkSize = chunkSize; this.idleMs = idleMs;
+    // Big files go up as separate part assets (each a short, complete upload) and a workflow joins them on GitHub:
+    // GitHub drops an upload connection that sits idle for a few seconds, so one long upstream request cannot
+    // survive a phone's network stall. Needs the workflow (UPLOAD_QUALITY_WORKFLOW) and Actions permission.
+    this.partsTag = String(partsTag || 'upload-parts').trim(); this.partSize = partSize; this.directMax = directMax; this.partsIdleMs = partsIdleMs;
     this.maxSessionsPerUser = maxSessionsPerUser; this.maxSessions = maxSessions;
     this.ownerEmail = String(ownerEmail || '').trim().toLowerCase();
     this.projectId = String(projectId || '').trim();
@@ -184,6 +191,7 @@ class UploadService {
   }
 
   activeFor(uid) { let n = 0; for (const s of this.sessions.values()) if (s.uid === uid && s.state === 'open') n++; return n; }
+  activeAll() { let n = 0; for (const s of this.sessions.values()) if (s.state === 'open') n++; return n; }
 
   /** Validates and reserves a name; the upstream request opens with the first byte. */
   async start(user, { kind, name, size, type }) {
@@ -196,7 +204,7 @@ class UploadService {
     if (t && !KINDS[kind].types.includes(t)) return { status: 415, body: { ok: false, error: 'wrong_type', expected: KINDS[kind].types[0] } };
     const base = safeName(name, kind);
     this.sweep();
-    if (this.activeFor(user.uid) >= this.maxSessionsPerUser || this.sessions.size >= this.maxSessions) return { status: 429, body: { ok: false, error: 'too_many_uploads' } };
+    if (this.activeFor(user.uid) >= this.maxSessionsPerUser || this.activeAll() >= this.maxSessions) return { status: 429, body: { ok: false, error: 'too_many_uploads' } };
 
     const tag = this.tags[kind];
     const releaseId = await this.gh.releaseId(tag);
@@ -207,19 +215,25 @@ class UploadService {
     for (const s of this.sessions.values()) if (s.tag === tag && s.state !== 'failed') taken.add(s.name.toLowerCase());
     const finalName = uniqueName(base, taken);
 
-    const id = crypto.randomBytes(12).toString('base64url');
+    const id = crypto.randomBytes(9).toString('hex');
+    const parts = !!this.qualityWorkflow && size > this.directMax;
     const s = { id, uid: user.uid, kind, tag, releaseId, name: finalName, size, type: KINDS[kind].types[0], received: 0,
-      state: 'open', busy: false, up: null, result: null, error: null, touched: this.now(), timer: null, head: Buffer.alloc(0) };
+      state: 'open', busy: false, up: null, result: null, error: null, touched: this.now(), timer: null, head: Buffer.alloc(0),
+      mode: parts ? 'parts' : 'stream', idleMs: parts ? this.partsIdleMs : this.idleMs };
+    if (parts) {
+      s.partsReleaseId = await this.gh.releaseId(this.partsTag);
+      s.prefix = `up-${id}`; s.partCount = Math.ceil(size / this.partSize); s.partTried = new Set();
+    }
     this.sessions.set(id, s);
     this.touch(s);
-    this.log && this.log.info(`upload: start ${kind} ${finalName} (${size} bytes) by ${user.uid}`);
-    return { status: 200, body: { ok: true, id, name: finalName, size, chunkSize: this.chunkSize, url: this.gh.downloadUrl(tag, finalName) } };
+    this.log && this.log.info(`upload: start ${kind} ${finalName} (${size} bytes, ${s.mode}) by ${user.uid}`);
+    return { status: 200, body: { ok: true, id, name: finalName, size, mode: s.mode, chunkSize: parts ? this.partSize : this.chunkSize, url: this.gh.downloadUrl(tag, finalName) } };
   }
 
   touch(s) {
     s.touched = this.now();
     clearTimeout(s.timer);
-    s.timer = setTimeout(() => { if (s.state === 'open' && !s.busy) this.fail(s, 'upload_timed_out'); }, this.idleMs);
+    s.timer = setTimeout(() => { if (s.state === 'open' && !s.busy && !s.assembling) this.fail(s, 'upload_timed_out'); }, s.idleMs || this.idleMs);
     if (s.timer.unref) s.timer.unref();
   }
 
@@ -233,7 +247,8 @@ class UploadService {
     if (s.state !== 'open') return;
     s.state = 'failed'; s.error = error; s.touched = this.now();
     clearTimeout(s.timer);
-    if (s.up) { s.up.abort(); this.cleanupStarter(s).catch(() => {}); }
+    if (s.mode === 'parts') { if (s.up) s.up.abort(); if (!s.assembling) this.cleanupParts(s).catch(() => {}); }
+    else if (s.up) { s.up.abort(); this.cleanupStarter(s).catch(() => {}); }
     this.log && this.log.warn(`upload: ${s.name} failed at ${s.received}/${s.size}: ${error}`);
   }
 
@@ -243,8 +258,113 @@ class UploadService {
     for (const a of assets) if (a.name === s.name && a.state !== 'uploaded') await this.gh.deleteAsset(a.id);
   }
 
+  async cleanupParts(s) {
+    await new Promise(r => setTimeout(r, 1500));
+    const assets = await this.gh.assets(s.partsReleaseId);
+    for (const a of assets) if (a.name.startsWith(s.prefix + '.')) await this.gh.deleteAsset(a.id).catch(() => {});
+  }
+
+  /** Parts mode: once all parts are up, the workflow joins them; this looks for the finished asset. */
+  async refresh(s) {
+    if (!s.assembling || s.state !== 'open') return;
+    if (s.checkedAt && this.now() - s.checkedAt < 4000) return;
+    s.checkedAt = this.now();
+    const assets = await this.gh.assets(s.releaseId);
+    const a = assets.find(x => x.name === s.name && x.state === 'uploaded');
+    if (a && Number(a.size) === s.size) {
+      s.state = 'done'; s.touched = this.now(); clearTimeout(s.timer);
+      s.result = { url: a.browser_download_url || this.gh.downloadUrl(s.tag, s.name), name: s.name, size: s.size, qualitiesStarted: s.kind === 'video' };
+      this.log && this.log.info(`upload: joined ${s.name} (${s.size} bytes)`);
+      return;
+    }
+    const runs = await this.gh.runs(this.qualityWorkflow);
+    const r = runs.find(x => String(x.display_title || x.name || '').includes(s.prefix));
+    if (r && r.status === 'completed' && r.conclusion !== 'success') { s.assembling = false; this.fail(s, 'assemble_failed'); s.runUrl = r.html_url; }
+    else if (!r && this.now() - s.assembleAt > 10 * 60 * 1000) { s.assembling = false; this.fail(s, 'assemble_failed'); }
+  }
+
+  partName(s, idx) { return `${s.prefix}.${String(idx).padStart(4, '0')}.part`; }
+
+  /** Parts mode: one request = one whole part = one complete small asset upload. */
+  partChunk(s, req, offset) {
+    return new Promise(resolve => {
+      const answer = (status, body) => { s.busy = false; this.touch(s); resolve({ status, body }); };
+      if (s.state === 'done') { req.resume(); return resolve({ status: 200, body: this.status(s) }); }
+      if (s.state === 'failed') { req.resume(); return resolve({ status: 410, body: this.status(s) }); }
+      if (s.assembling) { req.resume(); return resolve({ status: 200, body: this.status(s) }); }
+      if (s.busy) { req.resume(); return resolve({ status: 409, body: { ok: false, error: 'busy', received: s.received } }); }
+      if (offset !== s.received) { req.resume(); return resolve({ status: 409, body: { ok: false, error: 'offset_mismatch', received: s.received } }); }
+      const idx = offset / this.partSize;
+      const len = Math.min(this.partSize, s.size - offset);
+      const declared = Number(req.headers['content-length']);
+      if (!Number.isInteger(idx) || declared !== len) { req.resume(); return resolve({ status: 400, body: { ok: false, error: 'bad_chunk_length', expected: len, received: s.received } }); }
+      s.busy = true;
+      const kind = KINDS[s.kind]; const name = this.partName(s, idx);
+      let got = 0, ended = false, up = null, waiting = false, head = idx === 0 ? Buffer.alloc(0) : null;
+      const prep = (async () => {
+        if (!s.partTried.has(idx)) { s.partTried.add(idx); return; }
+        const assets = await this.gh.assets(s.partsReleaseId); // an earlier try of this part may have left an asset
+        for (const a of assets) if (a.name === name) await this.gh.deleteAsset(a.id).catch(() => {});
+      })();
+      const partFail = (status, error) => {
+        if (ended) return; ended = true;
+        if (up) up.abort(); // a leftover of this part is removed before the next try (prep) or with the session
+        req.resume();
+        answer(status, { ok: false, error, received: s.received });
+      };
+      const write = (buf) => {
+        if (!up) {
+          up = this.gh.openUpload(s.partsReleaseId, name, 'application/octet-stream', len);
+          up.done.catch(() => {});
+        }
+        got += buf.length;
+        if (!up.stream.write(buf) && !waiting) { waiting = true; req.pause(); up.stream.once('drain', () => { waiting = false; req.resume(); }); }
+      };
+      req.pause();
+      prep.then(() => req.resume(), () => req.resume());
+      req.on('data', d => {
+        if (ended || s.state !== 'open') return;
+        if (got + (head ? head.length : 0) + d.length > len) return partFail(413, 'chunk_too_large');
+        if (head) {
+          head = Buffer.concat([head, d]);
+          if (head.length < 16 && head.length < len) return;
+          if (!kind.sniff(head)) { ended = true; req.resume(); this.fail(s, 'wrong_type'); return answer(415, { ok: false, error: 'wrong_type', expected: s.type }); }
+          const h = head; head = null; return write(h);
+        }
+        write(d);
+      });
+      req.on('end', async () => {
+        if (ended) return;
+        if (head) { if (!kind.sniff(head)) { ended = true; this.fail(s, 'wrong_type'); return answer(415, { ok: false, error: 'wrong_type', expected: s.type }); } const h = head; head = null; write(h); }
+        if (got !== len) return partFail(400, 'bad_chunk_length');
+        ended = true;
+        up.stream.end();
+        try { await up.done; } catch (err) {
+          return answer(503, { ok: false, error: 'part_retry', received: s.received, detail: String(err.message).slice(0, 160) });
+        }
+        s.received += len;
+        if (s.received < s.size) return answer(200, { ok: true, received: s.received, size: s.size, done: false });
+        // all parts are on GitHub: ask the workflow to join them (and make quality copies for a video)
+        const r = await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag: s.tag, name: s.name, parts_tag: this.partsTag,
+          parts_prefix: s.prefix, parts_count: String(s.partCount), size: String(s.size), qualities: s.kind === 'video' ? '1' : '0' }).catch(e => ({ status: 0, error: e }));
+        if (r.status !== 204) {
+          this.fail(s, r.status === 403 || r.status === 401 ? 'github_actions_permission' : 'assemble_failed');
+          return answer(502, this.status(s));
+        }
+        s.assembling = true; s.assembleAt = this.now();
+        this.log && this.log.info(`upload: ${s.name}: ${s.partCount} parts up, joining on GitHub`);
+        return answer(200, { ...this.status(s), assembling: true });
+      });
+      const broken = () => { if (ended) return; ended = true; if (up) up.abort(); s.busy = false; this.touch(s); resolve({ status: 499, body: { ok: false, error: 'client_closed', received: s.received } }); };
+      req.on('aborted', broken);
+      req.on('error', broken);
+      req.on('close', () => { if (!ended && !req.complete) broken(); });
+    });
+  }
+
   status(s) {
     const b = { ok: s.state !== 'failed', id: s.id, name: s.name, size: s.size, received: s.received, done: s.state === 'done' };
+    if (s.assembling && s.state === 'open') b.assembling = true;
     if (s.result) Object.assign(b, s.result);
     if (s.error) b.error = s.error;
     return b;
@@ -257,6 +377,7 @@ class UploadService {
    * limit: max bytes this request may carry (chunk size; the whole file for the one-shot route).
    */
   chunk(s, req, offset, limit) {
+    if (s.mode === 'parts') return this.partChunk(s, req, offset);
     return new Promise(resolve => {
       const answer = (status, body) => { s.busy = false; this.touch(s); resolve({ status, body }); };
       if (s.state === 'done') { req.resume(); return resolve({ status: 200, body: this.status(s) }); }
@@ -350,6 +471,32 @@ class UploadService {
     return { status: 202, body: { ok: true, started: true, name: n, expected: Object.fromEntries(QUALITIES.map(q => [q, this.gh.downloadUrl(tag, qualityName(n, q))])) } };
   }
 
+  /** Import: a direct https MP4 link is copied onto the video release inside GitHub Actions (no bytes through this server). */
+  async startImport(user, { url, name } = {}) {
+    if (!this.kindConfigured('video') || !this.qualityWorkflow) return { status: 503, body: { ok: false, error: 'upload_not_configured' } };
+    let u;
+    try { u = new URL(String(url || '')); } catch (_) { return { status: 400, body: { ok: false, error: 'bad_url' } }; }
+    if (u.protocol !== 'https:' || String(url).length > 2000 || /\s/.test(String(url))) return { status: 400, body: { ok: false, error: 'bad_url' } };
+    if (u.hostname === 'github.com' && u.pathname.startsWith(`/${this.repo}/releases/download/`)) return { status: 400, body: { ok: false, error: 'already_on_github' } };
+    const base = safeName(name || decodeURIComponent(u.pathname.split('/').pop() || ''), 'video');
+    const key = `import:${url}`;
+    if (this.now() - (this.dispatchLimiter.get(key) || 0) < 60 * 1000) return { status: 429, body: { ok: false, error: 'already_started' } };
+    const tag = this.tags.video;
+    const releaseId = await this.gh.releaseId(tag);
+    const assets = await this.gh.assets(releaseId);
+    const taken = new Set(assets.map(a => a.name.toLowerCase()));
+    const finalName = uniqueName(base, taken);
+    const r = await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag, name: finalName, source_url: u.toString(), qualities: '1' });
+    if (r.status !== 204) {
+      const error = r.status === 403 || r.status === 401 ? 'github_actions_permission' : r.status === 404 ? 'workflow_not_found' : 'dispatch_failed';
+      return { status: 502, body: { ok: false, error, detail: `http ${r.status}` } };
+    }
+    this.dispatchLimiter.set(key, this.now());
+    this.log && this.log.info(`upload: import started for ${finalName} by ${user.uid}`);
+    return { status: 202, body: { ok: true, started: true, name: finalName, url: this.gh.downloadUrl(tag, finalName),
+      expected: Object.fromEntries(QUALITIES.map(q => [q, this.gh.downloadUrl(tag, qualityName(finalName, q))])) } };
+  }
+
   async qualityStatus(name) {
     if (!this.kindConfigured('video')) return { status: 503, body: { ok: false, error: 'upload_not_configured' } };
     const n = String(name || '');
@@ -368,9 +515,10 @@ class UploadService {
       const r = runs.find(x => String(x.display_title || x.name || '').includes(n));
       if (r) run = { status: r.status, conclusion: r.conclusion, url: r.html_url, startedAt: r.run_started_at || r.created_at };
     }
+    const orig = assets.find(x => x.name === n && x.state === 'uploaded');
     const ready = QUALITIES.every(q => urls[q]);
     const status = ready ? 'ready' : run ? (run.status === 'completed' ? (run.conclusion === 'success' ? 'partial' : 'failed') : 'running') : 'not_started';
-    return { status: 200, body: { ok: true, name: n, status, urls, run } };
+    return { status: 200, body: { ok: true, name: n, status, original: orig ? (orig.browser_download_url || this.gh.downloadUrl(tag, n)) : null, urls, run } };
   }
 }
 
@@ -435,6 +583,7 @@ async function handleUpload(req, res, url, { uploads, auth, adminOrigins, send, 
     if (p === '/api/upload/status' && req.method === 'GET') {
       const s = uploads.get(url.searchParams.get('id'), user.uid);
       if (!s) return reply(404, { ok: false, error: 'no_such_upload' });
+      await uploads.refresh(s).catch(err => log && log.warn(`upload: refresh: ${err.message}`));
       return reply(200, uploads.status(s));
     }
     if (p === '/api/upload/session' && req.method === 'DELETE') {
@@ -449,6 +598,7 @@ async function handleUpload(req, res, url, { uploads, auth, adminOrigins, send, 
       const st = await uploads.start(user, { kind: url.searchParams.get('kind'), name: url.searchParams.get('name'), size, type: req.headers['content-type'] });
       if (st.status !== 200) { drain(); return reply(st.status, st.body); }
       const s = uploads.get(st.body.id, user.uid);
+      s.mode = 'stream'; s.idleMs = uploads.idleMs;
       const r = await uploads.chunk(s, req, 0, size);
       if (r.status === 499) { uploads.fail(s, 'client_closed'); try { res.destroy(); } catch (_) { /* */ } return; }
       if (r.status === 200 && !r.body.done) { uploads.fail(s, 'incomplete'); return reply(400, { ok: false, error: 'incomplete' }); }
@@ -460,7 +610,13 @@ async function handleUpload(req, res, url, { uploads, auth, adminOrigins, send, 
       const r = await uploads.startQualities(user, b.value.name);
       return reply(r.status, r.body);
     }
-    if (p === '/api/upload/qualities' && req.method === 'GET') {
+    if (p === '/api/upload/import' && req.method === 'POST') {
+      const b = await readSmallJson(req);
+      if (b.error || !b.value) return reply(400, { ok: false, error: b.error || 'invalid_json' });
+      const r = await uploads.startImport(user, b.value);
+      return reply(r.status, r.body);
+    }
+    if ((p === '/api/upload/qualities' || p === '/api/upload/import') && req.method === 'GET') {
       const r = await uploads.qualityStatus(url.searchParams.get('name'));
       return reply(r.status, r.body);
     }
