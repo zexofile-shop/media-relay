@@ -78,6 +78,7 @@ function loadConfig(overrides = {}) {
     uploadReleaseVideo: str('UPLOAD_RELEASE_VIDEO'),  // release tag for videos (created if missing)
     uploadQualityWorkflow: str('UPLOAD_QUALITY_WORKFLOW'), // workflow file in UPLOAD_REPO that makes 720p/480p/360p copies
     uploadWorkflowRef: str('UPLOAD_WORKFLOW_REF', 'main'),
+    uploadReleaseParts: str('UPLOAD_RELEASE_PARTS', 'upload-parts'), // temporary part assets of big uploads (joined by the workflow)
   };
   return Object.assign(cfg, overrides);
 }
