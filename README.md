@@ -50,6 +50,7 @@ Auth on `/api/*`: header `X-App-Key: <APP_KEY>` (or `?k=`), or `Authorization: B
 | `UPLOAD_RELEASE_PDF`, `UPLOAD_RELEASE_VIDEO` | uploads: release tags for PDFs and MP4 videos (created if missing) |
 | `UPLOAD_QUALITY_WORKFLOW` | uploads, optional: workflow file in `UPLOAD_REPO` (see `tools/video-qualities.yml`) that makes 720p/480p/360p copies |
 | `UPLOAD_WORKFLOW_REF` | uploads, optional: branch the workflow runs on, default `main` |
+| `UPLOAD_RELEASE_PARTS` | uploads, optional: release tag for the temporary parts of big uploads, default `upload-parts` |
 
 The account must be a member of the channel. Keep `TG_SESSION` secret: it gives full access to the account.
 
@@ -85,8 +86,17 @@ GET    /api/upload/status?id=..        -> {received, done, url?}   (after a drop
 DELETE /api/upload/session?id=..       cancel
 ```
 
-A wrong offset answers 409 with `received`. The upstream request to GitHub stays open between chunks; if no chunk
-arrives for 3 minutes, or GitHub drops the connection, the upload fails (410) and starts again from zero.
+A wrong offset answers 409 with `received`.
+
+Two modes, chosen by size (`mode` in the start answer):
+- `stream` (files up to 32 MB, or when no workflow is set): one upstream request to GitHub stays open across the chunks.
+  GitHub drops an upload connection that sits idle for a short while, so a long network stall fails the upload (410)
+  and it starts again from zero.
+- `parts` (bigger files; needs `UPLOAD_QUALITY_WORKFLOW` and Actions permission): each chunk (16 MB, sent with its exact
+  length) is its own small asset `up-<id>.0000.part` on the release `UPLOAD_RELEASE_PARTS` (default `upload-parts`).
+  A failed part is just sent again (503 `part_retry`), and a stall costs nothing. After the last part the workflow joins
+  the parts into the final asset, checks the size and deletes the parts; the last chunk answers `assembling: true` and
+  `/api/upload/status` turns `done` with the `url` once the joined file is on the release (about a minute or two).
 One-shot alternative: `POST /api/upload?kind=pdf&name=x` with the whole file as the body (`curl --data-binary @x.pdf`).
 
 Names are made safe (`A-Z a-z 0-9 . _ -`); a name already on the release gets `-2`, `-3`… The first bytes are checked
@@ -97,7 +107,12 @@ Quality copies (optional): put `tools/video-qualities.yml` into `UPLOAD_REPO` as
 read/write on the token); `GET /api/upload/qualities?name=` answers `{status: not_started|running|ready|partial|failed, urls}`.
 The copies are `<name>_720p.mp4`, `_480p.mp4`, `_360p.mp4` on the same release.
 
-Bandwidth: every uploaded byte leaves this server once (to GitHub) and counts as outbound bandwidth on the host.
+Import (zero bytes through this server): `POST /api/upload/import {url, name?}` hands a direct https MP4 link to the
+workflow, which downloads it inside GitHub Actions, puts it on the video release and makes the quality copies.
+`GET /api/upload/import?name=` answers like the qualities status, with `original` set once the file is on the release.
+
+Bandwidth: every byte uploaded through this server leaves it once (to GitHub) and counts as outbound bandwidth on the
+host. Import does not.
 
 ## Deploy on Render
 
