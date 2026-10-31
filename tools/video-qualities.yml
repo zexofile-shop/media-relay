@@ -1,7 +1,10 @@
 name: video-qualities
-run-name: qualities ${{ inputs.name }}
-# Makes 720p / 480p / 360p copies of an MP4 that sits on a release of this repo, and uploads them to the same release
-# as <name>_720p.mp4, <name>_480p.mp4, <name>_360p.mp4 (index first, so players start fast). The original is never touched.
+run-name: ${{ inputs.parts_count != '' && format('assemble {0} {1}', inputs.name, inputs.parts_prefix) || inputs.source_url != '' && format('import {0}', inputs.name) || format('qualities {0}', inputs.name) }}
+# 1) Optional join: a big upload arrives as part assets (<prefix>.0000.part, ...) on the parts release; they are joined
+#    into <name> on the target release, checked against the expected size, and the parts are deleted.
+#    Or import: source_url (a direct https link to an MP4) is downloaded here and put on the target release as <name>.
+# 2) Makes 720p / 480p / 360p copies of an MP4 on the target release and uploads them as <name>_720p.mp4,
+#    <name>_480p.mp4, <name>_360p.mp4 (index first, so players start fast). The original is never changed.
 on:
   workflow_dispatch:
     inputs:
@@ -9,8 +12,32 @@ on:
         description: Release tag that holds the video
         required: true
       name:
-        description: Asset name of the video (.mp4)
+        description: Asset name of the file (.mp4 or .pdf)
         required: true
+      parts_tag:
+        description: Release that holds the parts (join mode)
+        required: false
+        default: ''
+      parts_prefix:
+        description: Part name prefix (join mode)
+        required: false
+        default: ''
+      parts_count:
+        description: Number of parts (join mode)
+        required: false
+        default: ''
+      size:
+        description: Expected size in bytes of the joined file (join mode)
+        required: false
+        default: ''
+      source_url:
+        description: Import mode, a direct https link to an MP4 to copy onto the release
+        required: false
+        default: ''
+      qualities:
+        description: Make 720p/480p/360p copies (1 or 0)
+        required: false
+        default: '1'
 permissions:
   contents: write
 concurrency:
@@ -23,21 +50,64 @@ jobs:
     env:
       TAG: ${{ inputs.tag }}
       NAME: ${{ inputs.name }}
+      PARTS_TAG: ${{ inputs.parts_tag }}
+      PREFIX: ${{ inputs.parts_prefix }}
+      COUNT: ${{ inputs.parts_count }}
+      SIZE: ${{ inputs.size }}
+      SOURCE_URL: ${{ inputs.source_url }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check inputs
         run: |
-          [[ "$NAME" =~ ^[A-Za-z0-9._-]{1,140}\.mp4$ ]] || { echo "bad name"; exit 1; }
+          [[ "$NAME" =~ ^[A-Za-z0-9._-]{1,140}\.(mp4|pdf)$ ]] || { echo "bad name"; exit 1; }
           [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "bad tag"; exit 1; }
+          if [ -n "$SOURCE_URL" ]; then [[ "$SOURCE_URL" =~ ^https://[^[:space:]]+$ ]] || { echo "bad source url"; exit 1; }; fi
+          if [ -n "$COUNT" ]; then
+            [[ "$PARTS_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "bad parts tag"; exit 1; }
+            [[ "$PREFIX" =~ ^up-[a-f0-9]{6,40}$ ]] || { echo "bad prefix"; exit 1; }
+            [[ "$COUNT" =~ ^[0-9]{1,4}$ && "$SIZE" =~ ^[0-9]{1,12}$ ]] || { echo "bad count/size"; exit 1; }
+          fi
       - name: Tools
+        if: inputs.qualities != '0' && endsWith(inputs.name, '.mp4')
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Join parts
+        if: inputs.parts_count != ''
+        run: |
+          mkdir -p parts src
+          gh release download "$PARTS_TAG" -R "$GITHUB_REPOSITORY" -p "$PREFIX.*.part" -D parts
+          n=$(ls parts | wc -l); echo "parts: $n of $COUNT"; [ "$n" = "$COUNT" ] || { echo "missing parts"; exit 1; }
+          ls parts | sort | sed 's#^#parts/#' | xargs cat > "src/$NAME"
+          got=$(stat -c %s "src/$NAME"); echo "joined $got bytes, expected $SIZE"; [ "$got" = "$SIZE" ] || exit 1
+          rm -rf parts
+          gh release upload "$TAG" "src/$NAME" -R "$GITHUB_REPOSITORY"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$NAME" >> "$GITHUB_STEP_SUMMARY"
+      - name: Delete parts (and any older than a day)
+        if: always() && inputs.parts_count != ''
+        run: |
+          cutoff=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PARTS_TAG" --jq ".assets[] | select((.name | startswith(\"$PREFIX.\")) or (.created_at < \"$cutoff\")) | .id" | while read -r id; do
+            [ "${{ job.status }}" = "success" ] || [[ "$(gh api repos/$GITHUB_REPOSITORY/releases/assets/$id --jq .name)" != "$PREFIX."* ]] || continue
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id" && echo "deleted $id"
+          done
+      - name: Import from link
+        if: inputs.source_url != ''
+        run: |
+          mkdir -p src
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx "$NAME"; then echo "already on the release"; gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$NAME" -D src; exit 0; fi
+          curl -fL --retry 3 --retry-delay 5 --max-filesize 2130706432 -o "src/$NAME" "$SOURCE_URL"
+          got=$(stat -c %s "src/$NAME"); echo "downloaded $got bytes"
+          [ "$(head -c 8 "src/$NAME" | tail -c 4)" = "ftyp" ] || { echo "not an MP4 file"; exit 1; }
+          gh release upload "$TAG" "src/$NAME" -R "$GITHUB_REPOSITORY"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$NAME" >> "$GITHUB_STEP_SUMMARY"
       - name: Download
+        if: inputs.parts_count == '' && inputs.source_url == '' && inputs.qualities != '0' && endsWith(inputs.name, '.mp4')
         run: |
           mkdir -p src out
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$NAME" -D src
           ls -l src
           ffprobe -v error -show_entries stream=codec_type,width,height,bit_rate:format=duration,size -of compact src/"$NAME"
       - name: Encode 720p, 480p, 360p (one decode)
+        if: inputs.qualities != '0' && endsWith(inputs.name, '.mp4')
         run: |
           base="${NAME%.mp4}"
           H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 src/"$NAME" | head -1)
@@ -53,6 +123,7 @@ jobs:
             -map "[v360]" "${AMAP[@]}" $(v 26 650k 1300k) $(a 64k) -movflags +faststart out/"${base}_360p.mp4"
           ls -l out
       - name: Upload copies
+        if: inputs.qualities != '0' && endsWith(inputs.name, '.mp4')
         run: |
           gh release upload "$TAG" out/*.mp4 -R "$GITHUB_REPOSITORY" --clobber
           for f in out/*.mp4; do echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$(basename "$f")"; done >> "$GITHUB_STEP_SUMMARY"
