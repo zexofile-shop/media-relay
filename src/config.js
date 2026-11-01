@@ -78,6 +78,9 @@ function loadConfig(overrides = {}) {
     roomPushTitleField: str('ROOM_PUSH_TITLE_FIELD', 'title'),
     roomPushTopicPrefix: str('ROOM_PUSH_TOPIC_PREFIX', 'chat_'),
     roomPushRatePerMin: num('ROOM_PUSH_RATE_PER_MIN', 6),
+    // v5.18 hybrid: chat messages on Supabase (public URL + public anon/publishable key; no secret key here)
+    supabaseUrl: str('SUPABASE_URL', ''),
+    supabaseKey: str('SUPABASE_PUBLIC_KEY', ''),
 
     // admin uploads (/api/upload): files go into GitHub release assets
     uploadToken: str('GITHUB_UPLOAD_TOKEN'),          // fine-grained token: Contents (and Actions) read/write on UPLOAD_REPO only

@@ -15,7 +15,7 @@ function createApp({ config, source, cache, auth, log, push, uploads, roomPush }
   const adminOrigins = parseOrigins(config.adminOrigins);
   const roomPushService = roomPush || new RoomPush({ push: pushService, configDoc: config.roomPushConfigDoc, switchField: config.roomPushSwitch,
     msgPath: config.roomPushMsgPath, roomDoc: config.roomPushRoomDoc, titleField: config.roomPushTitleField, topicPrefix: config.roomPushTopicPrefix,
-    ratePerMin: config.roomPushRatePerMin ?? 6, log });
+    ratePerMin: config.roomPushRatePerMin ?? 6, supabaseUrl: config.supabaseUrl, supabaseKey: config.supabaseKey, log });
   const uploadService = uploads || new UploadService({ token: config.uploadToken, repo: config.uploadRepo, pdfTag: config.uploadReleasePdf,
     videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, workflowRef: config.uploadWorkflowRef, partsTag: config.uploadReleaseParts,
     ownerEmail: config.ownerEmail, projectId: config.firebaseProjectId, push: pushService, log });
