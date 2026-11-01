@@ -33,8 +33,12 @@ class RoomPush {
    * @param {import('./push').PushService} o.push configured PushService (service account + token source + fetch)
    */
   constructor({ push, configDoc = 'app_config/community', switchField = 'chatPushEnabled', msgPath = 'batches/{room}/chat/{msg}',
-    roomDoc = 'batches/{room}', titleField = 'title', topicPrefix = 'chat_', ratePerMin = 6, roomGapMs = 2000, maxAgeMs = 3 * 60 * 1000, now, log } = {}) {
+    roomDoc = 'batches/{room}', titleField = 'title', topicPrefix = 'chat_', ratePerMin = 6, roomGapMs = 2000, maxAgeMs = 3 * 60 * 1000, now, log,
+    supabaseUrl = '', supabaseKey = '', fetchImpl } = {}) {
     this.push = push; this.log = log;
+    // v5.18 hybrid: messages posted on Supabase (app sends backend: 'supabase') are read from Supabase with the
+    // SENDER'S OWN Firebase token, so Supabase's row-level security decides (no secret key on this server).
+    this.sbUrl = String(supabaseUrl || '').replace(/\/+$/, ''); this.sbKey = supabaseKey; this.fetchImpl = fetchImpl;
     this.configDoc = configDoc; this.switchField = switchField; this.msgPath = msgPath; this.roomDoc = roomDoc; this.titleField = titleField;
     this.topicPrefix = topicPrefix; this.roomGapMs = roomGapMs; this.maxAgeMs = maxAgeMs;
     this.now = now || (() => push.now());
@@ -52,6 +56,16 @@ class RoomPush {
     if (r.status === 404) return null;
     if (r.status !== 200) { const e = new Error(`read_failed: ${r.status}`); e.code = 'read_failed'; throw e; }
     return fsFields(await r.json());
+  }
+
+  async getSbMessage(room, msg, userToken) {
+    const f = this.fetchImpl || this.push.fetch;
+    const url = `${this.sbUrl}/rest/v1/chat_messages?select=uid,name,text,created_at&id=eq.${encodeURIComponent(msg)}&batch_id=eq.${encodeURIComponent(room)}&limit=1`;
+    const r = await f(url, { headers: { apikey: this.sbKey, Authorization: `Bearer ${userToken}`, Accept: 'application/json' } });
+    if (r.status !== 200) { const e = new Error(`read_failed: ${r.status}`); e.code = 'read_failed'; throw e; }
+    const rows = await r.json();
+    const m = rows && rows[0];
+    return m ? { uid: m.uid, name: m.name, text: m.text, createdAt: Date.parse(m.created_at) || 0 } : null;
   }
 
   async enabled() {
@@ -86,7 +100,10 @@ class RoomPush {
     try {
       on = await this.enabled();
       if (!on) return { status: 200, body: { ok: true, skipped: 'off' } };
-      m = await this.getDoc(fill(this.msgPath, room, msg));
+      if (body.backend === 'supabase') {
+        if (!this.sbUrl || !this.sbKey || !user.token) return { status: 503, body: { ok: false, error: 'supabase_not_configured' } };
+        m = await this.getSbMessage(room, msg, user.token);
+      } else m = await this.getDoc(fill(this.msgPath, room, msg));
     } catch (err) {
       this.log && this.log.warn(`room-push: read failed: ${err.message}`);
       return { status: 502, body: { ok: false, error: 'read_failed' } };
@@ -131,6 +148,7 @@ async function handleRoomPush(req, res, { roomPush, auth, send }) {
   const mm = /^Bearer\s+(.+)$/i.exec(h);
   const user = mm ? await auth.verifyUser(mm[1].trim()) : null;   // also refuses blocked accounts
   if (!user) { if (!req.complete) req.resume(); return send(res, 401, { ok: false, error: 'login_required' }); }
+  user.token = mm[1].trim();   // v5.18: forwarded to Supabase (row-level security) for backend: 'supabase'
   const { readJsonBody } = require('./push');
   const parsed = await readJsonBody(req, 2048);
   if (parsed.error) return send(res, parsed.error === 'body_too_large' ? 413 : 400, { ok: false, error: parsed.error });
