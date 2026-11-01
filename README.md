@@ -70,6 +70,21 @@ The server reads Firestore and sends through FCM HTTP v1 with OAuth tokens minte
 Answers `{ "ok": true, "messageId": "projects/.../messages/..." }` or `{ "ok": false, "error": "..." }`
 (401 `login_required`, 403 `not_admin`, 400 validation, 429 rate limit, 503 `push_not_configured`, 502 FCM error).
 
+## Member room pushes
+
+`POST /api/room-push` with `Authorization: Bearer <Firebase ID token>` and `{ "room": "<roomId>", "msg": "<messageId>" }`,
+sent by the app right after a member's message is saved. The server re-reads the message with the service account
+(`ROOM_PUSH_MSG_PATH`, default `batches/{room}/chat/{msg}`): it must exist, belong to the caller and be under 3 minutes old.
+The switch `ROOM_PUSH_SWITCH` (default `chatPushEnabled`) in `ROOM_PUSH_CONFIG_DOC` (default `app_config/community`) must
+not be `false` (cached 60 s). Then ONE data-only FCM message goes to topic `ROOM_PUSH_TOPIC_PREFIX + room`
+(default `chat_<room>`) with `android.collapse_key` per room and high priority; data keys: `kind=chat, room, msg, uid,
+name, text (max 80), title (room title from ROOM_PUSH_ROOM_DOC / ROOM_PUSH_TITLE_FIELD, cached 10 min), body, open, at`.
+The app draws the notification itself (skips its own uid, muted rooms and the room on screen).
+Limits: `ROOM_PUSH_RATE_PER_MIN` per user (default 6), one push per room per 2 s, each message once.
+Answers 200 `{ok:true, messageId}` or `{ok:true, skipped: "off"|"duplicate"|"room_busy"}`; 401 `login_required`
+(also blocked accounts), 400 `bad_request`, 404 `not_found` (missing or someone else's message), 409 `too_old`,
+429, 502 `read_failed`/FCM error, 503 `push_not_configured` (no `FCM_SERVICE_ACCOUNT`).
+
 ## Uploads (admins)
 
 Signed-in staff (`OWNER_EMAIL`, or a Firestore `admins/{email}` document — read with the service account when

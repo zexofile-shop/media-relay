@@ -70,6 +70,14 @@ function loadConfig(overrides = {}) {
     adminOrigins: str('ADMIN_ORIGINS'), // comma list of origins allowed to call /api/push from a browser
     pushChannelId: str('PUSH_CHANNEL_ID'),
     pushRatePerMin: num('PUSH_RATE_PER_MIN', 20),
+    // member room pushes (POST /api/room-push); all optional, generic defaults
+    roomPushConfigDoc: str('ROOM_PUSH_CONFIG_DOC', 'app_config/community'),
+    roomPushSwitch: str('ROOM_PUSH_SWITCH', 'chatPushEnabled'),
+    roomPushMsgPath: str('ROOM_PUSH_MSG_PATH', 'batches/{room}/chat/{msg}'),
+    roomPushRoomDoc: str('ROOM_PUSH_ROOM_DOC', 'batches/{room}'),
+    roomPushTitleField: str('ROOM_PUSH_TITLE_FIELD', 'title'),
+    roomPushTopicPrefix: str('ROOM_PUSH_TOPIC_PREFIX', 'chat_'),
+    roomPushRatePerMin: num('ROOM_PUSH_RATE_PER_MIN', 6),
 
     // admin uploads (/api/upload): files go into GitHub release assets
     uploadToken: str('GITHUB_UPLOAD_TOKEN'),          // fine-grained token: Contents (and Actions) read/write on UPLOAD_REPO only

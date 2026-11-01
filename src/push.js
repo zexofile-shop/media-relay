@@ -253,4 +253,4 @@ async function handlePush(req, res, { push, auth, adminOrigins, send, log }) {
   return send(res, out.ok ? 200 : 502, out, cors);
 }
 
-module.exports = { PushService, GoogleTokenSource, KeyedRateLimiter, parseServiceAccount, validatePush, buildFcmMessage, parseOrigins, handlePush, SCOPES };
+module.exports = { PushService, GoogleTokenSource, KeyedRateLimiter, parseServiceAccount, validatePush, buildFcmMessage, parseOrigins, handlePush, readJsonBody, SCOPES };
