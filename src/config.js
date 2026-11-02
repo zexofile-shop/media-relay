@@ -82,6 +82,11 @@ function loadConfig(overrides = {}) {
     supabaseUrl: str('SUPABASE_URL', ''),
     supabaseKey: str('SUPABASE_PUBLIC_KEY', ''),
 
+    // admin image uploads (POST /api/img) -> imgbb; the key lives only here (env), never in the panel
+    imgbbKey: str('IMGBB_KEY'),
+    imgbbMaxBytes: num('IMGBB_MAX_BYTES', 10 * 1024 * 1024),
+    imgbbRatePerMin: num('IMGBB_RATE_PER_MIN', 30),
+
     // admin uploads (/api/upload): files go into GitHub release assets
     uploadToken: str('GITHUB_UPLOAD_TOKEN'),          // fine-grained token: Contents (and Actions) read/write on UPLOAD_REPO only
     uploadRepo: str('UPLOAD_REPO'),                   // owner/name
