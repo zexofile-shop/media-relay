@@ -44,6 +44,8 @@ services:
         sync: false
       - key: UPLOAD_QUALITY_WORKFLOW
         sync: false
+      - key: IMGBB_KEY
+        sync: false
       - key: CACHE_DIR
         value: /tmp/cache
       - key: CACHE_MAX_GB
