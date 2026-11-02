@@ -1,5 +1,5 @@
 'use strict';
-// HTTP layer: /health, /api/videos, /api/sign, /stream/:msgId (Range), /thumb/:msgId, /api/stats, POST /api/push, POST /api/room-push
+// HTTP layer: /health, /api/videos, /api/sign, /stream/:msgId (Range), /thumb/:msgId, /api/stats, POST /api/push, POST /api/room-push, POST /api/img
 const http = require('http');
 const { parseRange } = require('./range');
 const { Auth, RateLimiter } = require('./auth');
@@ -7,8 +7,9 @@ const { CHUNK_SIZE } = require('./chunkCache');
 const { PushService, handlePush, parseOrigins } = require('./push');
 const { UploadService, handleUpload } = require('./upload');
 const { RoomPush, handleRoomPush } = require('./roomPush');
+const { ImgbbService, handleImg } = require('./img');
 
-function createApp({ config, source, cache, auth, log, push, uploads, roomPush }) {
+function createApp({ config, source, cache, auth, log, push, uploads, roomPush, imgbb }) {
   const limiter = new RateLimiter(config.rateLimitPerMin);
   const pushService = push || new PushService({ serviceAccount: config.fcmServiceAccount, ownerEmail: config.ownerEmail,
     channelId: config.pushChannelId, ratePerMin: config.pushRatePerMin ?? 20, log });
@@ -19,6 +20,7 @@ function createApp({ config, source, cache, auth, log, push, uploads, roomPush }
   const uploadService = uploads || new UploadService({ token: config.uploadToken, repo: config.uploadRepo, pdfTag: config.uploadReleasePdf,
     videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, workflowRef: config.uploadWorkflowRef, partsTag: config.uploadReleaseParts,
     ownerEmail: config.ownerEmail, projectId: config.firebaseProjectId, push: pushService, log });
+  const imgbbService = imgbb || new ImgbbService({ key: config.imgbbKey, maxBytes: config.imgbbMaxBytes, ratePerMin: config.imgbbRatePerMin ?? 30, log });
   const started = Date.now();
   let listCache = null; // { at, videos }
   let listInflight = null;
@@ -159,6 +161,10 @@ function createApp({ config, source, cache, auth, log, push, uploads, roomPush }
     if (p === '/api/upload' || p.startsWith('/api/upload/')) {
       if (req.method !== 'OPTIONS' && !limiter.allow(clientIp(req))) { if (!req.complete) req.resume(); return send(res, 429, { ok: false, error: 'too_many_requests' }, { 'Retry-After': '60' }); }
       return handleUpload(req, res, url, { uploads: uploadService, auth, adminOrigins, send, log });
+    }
+    if (p === '/api/img' || p.startsWith('/api/img/')) {
+      if (req.method !== 'OPTIONS' && !limiter.allow(clientIp(req))) { if (!req.complete) req.resume(); return send(res, 429, { ok: false, error: 'too_many_requests' }, { 'Retry-After': '60' }); }
+      return handleImg(req, res, url, { imgbb: imgbbService, uploads: uploadService, auth, adminOrigins, send, log });
     }
     if (p === '/api/room-push') {
       if (!limiter.allow(clientIp(req))) { if (!req.complete) req.resume(); return send(res, 429, { ok: false, error: 'too_many_requests' }, { 'Retry-After': '60' }); }
