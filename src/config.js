@@ -93,6 +93,8 @@ function loadConfig(overrides = {}) {
     uploadReleasePdf: str('UPLOAD_RELEASE_PDF'),      // release tag for PDFs (created if missing)
     uploadReleaseVideo: str('UPLOAD_RELEASE_VIDEO'),  // release tag for videos (created if missing)
     uploadQualityWorkflow: str('UPLOAD_QUALITY_WORKFLOW'), // workflow file in UPLOAD_REPO that makes 720p/480p/360p copies
+    uploadHlsWorkflow: str('UPLOAD_HLS_WORKFLOW', 'lecture-hls.yml'), // videos become locked HLS (720/480/360p) on R2 via this workflow ('off' = old MP4 copies)
+    uploadHlsBase: str('UPLOAD_HLS_BASE', 'https://pub-10df8dcbea28417faa1136efd9fa3c26.r2.dev'), // public base of the lectures bucket
     uploadWorkflowRef: str('UPLOAD_WORKFLOW_REF', 'main'),
     uploadReleaseParts: str('UPLOAD_RELEASE_PARTS', 'upload-parts'), // temporary part assets of big uploads (joined by the workflow)
   };
