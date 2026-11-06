@@ -491,3 +491,44 @@ test('upload import: a direct MP4 link is handed to the workflow, nothing passes
     assert.strictEqual(r.status, 401);
   } finally { await s.close(); }
 });
+
+
+test('upload: locked lectures (HLS): every video path goes to the HLS workflow with an id; status reads info.json on R2', async () => {
+  const gh = fakeGitHub({ releases: { 'books-up': 11, 'lectures-v1': 12 }, existing: [{ name: 'Real.Numbers-1.mp4', release: 12 }],
+    runs: [{ display_title: 'hls Real-Numbers-1 Real.Numbers-1.mp4', status: 'in_progress', conclusion: null, html_url: 'https://github.com/o/r/actions/runs/9' }] });
+  let infoReady = false; const seen = [];
+  const hlsFetch = async (url) => { seen.push(url); const ok = infoReady && /\/lectures\/Real-Numbers-1\/info\.json\?t=\d+$/.test(url);
+    return { status: ok ? 200 : 404, json: async () => ({ id: 'Real-Numbers-1', source: 'Real.Numbers-1.mp4', durationSec: 2400, totalBytes: 250e6, bytes: { '720p': 1 } }) }; };
+  const s = await startServer({ uploads: makeUploads(gh, { hlsWorkflow: 'lecture-hls.yml', hlsBase: 'https://pub-x.r2.dev/', hlsFetch }) });
+  try {
+    let r = await request(s.port, '/api/upload/qualities', { method: 'POST', headers: auth('owner-token'), body: { name: 'Real.Numbers-1.mp4' } });
+    assert.strictEqual(r.status, 202);
+    assert.strictEqual(r.json.locked, true);
+    assert.deepStrictEqual(gh.st.dispatches, [{ wf: 'lecture-hls.yml', ref: 'main', inputs: { tag: 'lectures-v1', name: 'Real.Numbers-1.mp4', id: 'Real-Numbers-1' } }]);
+    assert.strictEqual(r.json.expected['480p'], 'https://pub-x.r2.dev/lectures/Real-Numbers-1/480p/index.m3u8');
+    r = await request(s.port, '/api/upload/qualities?name=Real.Numbers-1.mp4', { headers: auth('owner-token') });
+    assert.strictEqual(r.json.status, 'running');
+    assert.deepStrictEqual(r.json.urls, {});
+    infoReady = true;
+    r = await request(s.port, '/api/upload/qualities?name=Real.Numbers-1.mp4', { headers: auth('owner-token') });
+    assert.strictEqual(r.json.status, 'ready');
+    assert.strictEqual(r.json.urls['720p'], 'https://pub-x.r2.dev/lectures/Real-Numbers-1/720p/index.m3u8');
+    assert.strictEqual(r.json.info.totalBytes, 250e6);
+    // import from a link -> HLS workflow too, never the MP4-copies one
+    r = await request(s.port, '/api/upload/import', { method: 'POST', headers: auth('owner-token'), body: { url: 'https://videos.example/play/Ch%202.mp4' } });
+    assert.strictEqual(r.status, 202);
+    const last = gh.st.dispatches[gh.st.dispatches.length - 1];
+    assert.strictEqual(last.wf, 'lecture-hls.yml');
+    assert.strictEqual(last.inputs.id, require('../src/upload').hlsId(last.inputs.name));
+    assert.ok(!('qualities' in last.inputs));
+    assert.ok(gh.st.dispatches.every(d => d.wf === 'lecture-hls.yml'));
+  } finally { await s.close(); }
+});
+
+test('upload: hlsId keeps only safe characters', () => {
+  const { hlsId } = require('../src/upload');
+  assert.strictEqual(hlsId('Real.Numbers Class10.mp4'), 'Real-Numbers-Class10');
+  assert.strictEqual(hlsId('../../x.mp4'), 'x');
+  assert.strictEqual(hlsId('a_b-c.mp4'), 'a_b-c');
+  assert.ok(hlsId('x'.repeat(200) + '.mp4').length <= 80);
+});
