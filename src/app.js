@@ -18,7 +18,7 @@ function createApp({ config, source, cache, auth, log, push, uploads, roomPush, 
     msgPath: config.roomPushMsgPath, roomDoc: config.roomPushRoomDoc, titleField: config.roomPushTitleField, topicPrefix: config.roomPushTopicPrefix,
     ratePerMin: config.roomPushRatePerMin ?? 6, supabaseUrl: config.supabaseUrl, supabaseKey: config.supabaseKey, log });
   const uploadService = uploads || new UploadService({ token: config.uploadToken, repo: config.uploadRepo, pdfTag: config.uploadReleasePdf,
-    videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, workflowRef: config.uploadWorkflowRef, partsTag: config.uploadReleaseParts,
+    videoTag: config.uploadReleaseVideo, qualityWorkflow: config.uploadQualityWorkflow, hlsWorkflow: config.uploadHlsWorkflow === 'off' ? '' : config.uploadHlsWorkflow, hlsBase: config.uploadHlsBase, workflowRef: config.uploadWorkflowRef, partsTag: config.uploadReleaseParts,
     ownerEmail: config.ownerEmail, projectId: config.firebaseProjectId, push: pushService, log });
   const imgbbService = imgbb || new ImgbbService({ key: config.imgbbKey, maxBytes: config.imgbbMaxBytes, ratePerMin: config.imgbbRatePerMin ?? 30, log });
   const started = Date.now();
