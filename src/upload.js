@@ -51,6 +51,8 @@ function uniqueName(name, taken) {
 }
 
 function qualityName(name, q) { return name.replace(/\.mp4$/i, '') + `_${q}.mp4`; }
+/** Locked-lecture (HLS) id for a video asset name: its base, only letters, digits, - and _ (the R2 folder). */
+function hlsId(name) { return String(name).replace(/\.mp4$/i, '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'lecture'; }
 
 class GitHubReleases {
   constructor({ token, repo, fetchImpl = globalThis.fetch, uploadImpl, apiBase = 'https://api.github.com', uploadBase = 'https://uploads.github.com' }) {
@@ -140,7 +142,7 @@ class UploadService {
    *                    ownerEmail, projectId (Firebase, for the staff check with the caller's own token),
    *                    push (PushService: staff check through the service account when it is set)
    */
-  constructor({ token = '', repo = '', pdfTag = '', videoTag = '', qualityWorkflow = '', workflowRef = 'main', chunkSize = DEFAULT_CHUNK,
+  constructor({ token = '', repo = '', pdfTag = '', videoTag = '', qualityWorkflow = '', hlsWorkflow = '', hlsBase = '', hlsFetch, workflowRef = 'main', chunkSize = DEFAULT_CHUNK,
     idleMs = 3 * 60 * 1000, maxSessionsPerUser = 2, maxSessions = 4, ownerEmail = '', projectId = '', push = null,
     partsTag = 'upload-parts', partSize = 16 * 1024 * 1024, directMax = 32 * 1024 * 1024, partsIdleMs = 30 * 60 * 1000,
     fetchImpl = globalThis.fetch, uploadImpl, now = () => Date.now(), log } = {}) {
@@ -148,6 +150,11 @@ class UploadService {
     this.tags = { pdf: String(pdfTag || '').trim(), video: String(videoTag || '').trim() };
     this.gh = (token && /^[\w.-]+\/[\w.-]+$/.test(this.repo)) ? new GitHubReleases({ token: String(token).trim(), repo: this.repo, fetchImpl, uploadImpl }) : null;
     this.qualityWorkflow = String(qualityWorkflow || '').trim();
+    // Locked lectures: when set, every video goes to this workflow (HLS 720/480/360p, encrypted) instead of MP4 copies.
+    this.hlsWorkflow = String(hlsWorkflow || '').trim();
+    this.hlsBase = String(hlsBase || '').trim().replace(/\/+$/, '');
+    this.hlsFetch = hlsFetch || globalThis.fetch;
+    if (this.hlsWorkflow && !this.qualityWorkflow) this.qualityWorkflow = this.hlsWorkflow;
     this.workflowRef = workflowRef || 'main';
     this.chunkSize = chunkSize; this.idleMs = idleMs;
     // Big files go up as separate part assets (each a short, complete upload) and a workflow joins them on GitHub:
@@ -277,7 +284,7 @@ class UploadService {
       this.log && this.log.info(`upload: joined ${s.name} (${s.size} bytes)`);
       return;
     }
-    const runs = await this.gh.runs(this.qualityWorkflow);
+    const runs = await this.gh.runs(s.kind === 'video' && this.hlsWorkflow ? this.hlsWorkflow : this.qualityWorkflow);
     const r = runs.find(x => String(x.display_title || x.name || '').includes(s.prefix));
     if (r && r.status === 'completed' && r.conclusion !== 'success') { s.assembling = false; this.fail(s, 'assemble_failed'); s.runUrl = r.html_url; }
     else if (!r && this.now() - s.assembleAt > 10 * 60 * 1000) { s.assembling = false; this.fail(s, 'assemble_failed'); }
@@ -345,8 +352,10 @@ class UploadService {
         s.received += len;
         if (s.received < s.size) return answer(200, { ok: true, received: s.received, size: s.size, done: false });
         // all parts are on GitHub: ask the workflow to join them (and make quality copies for a video)
-        const r = await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag: s.tag, name: s.name, parts_tag: this.partsTag,
-          parts_prefix: s.prefix, parts_count: String(s.partCount), size: String(s.size), qualities: s.kind === 'video' ? '1' : '0' }).catch(e => ({ status: 0, error: e }));
+        const hls = s.kind === 'video' && !!this.hlsWorkflow;
+        const join = { tag: s.tag, name: s.name, parts_tag: this.partsTag, parts_prefix: s.prefix, parts_count: String(s.partCount), size: String(s.size) };
+        const r = await this.gh.dispatch(hls ? this.hlsWorkflow : this.qualityWorkflow, this.workflowRef,
+          hls ? { ...join, id: hlsId(s.name) } : { ...join, qualities: s.kind === 'video' ? '1' : '0' }).catch(e => ({ status: 0, error: e }));
         if (r.status !== 204) {
           this.fail(s, r.status === 403 || r.status === 401 ? 'github_actions_permission' : 'assemble_failed');
           return answer(502, this.status(s));
@@ -461,14 +470,15 @@ class UploadService {
     const assets = await this.gh.assets(releaseId);
     const src = assets.find(a => a.name === n && a.state === 'uploaded');
     if (!src) return { status: 404, body: { ok: false, error: 'video_not_found' } };
-    const r = await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag, name: n });
+    const r = this.hlsWorkflow ? await this.gh.dispatch(this.hlsWorkflow, this.workflowRef, { tag, name: n, id: hlsId(n) })
+      : await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag, name: n });
     if (r.status !== 204) {
       const error = r.status === 403 || r.status === 401 ? 'github_actions_permission' : r.status === 404 ? 'workflow_not_found' : 'dispatch_failed';
       return { status: 502, body: { ok: false, error, detail: `http ${r.status}` } };
     }
     this.dispatchLimiter.set(n, this.now());
     this.log && this.log.info(`upload: quality copies started for ${n} by ${user.uid}`);
-    return { status: 202, body: { ok: true, started: true, name: n, expected: Object.fromEntries(QUALITIES.map(q => [q, this.gh.downloadUrl(tag, qualityName(n, q))])) } };
+    return { status: 202, body: { ok: true, started: true, name: n, locked: !!this.hlsWorkflow, expected: this.expectedUrls(tag, n) } };
   }
 
   /** Import: a direct https MP4 link is copied onto the video release inside GitHub Actions (no bytes through this server). */
@@ -486,7 +496,8 @@ class UploadService {
     const assets = await this.gh.assets(releaseId);
     const taken = new Set(assets.map(a => a.name.toLowerCase()));
     const finalName = uniqueName(base, taken);
-    const r = await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag, name: finalName, source_url: u.toString(), qualities: '1' });
+    const r = this.hlsWorkflow ? await this.gh.dispatch(this.hlsWorkflow, this.workflowRef, { tag, name: finalName, source_url: u.toString(), id: hlsId(finalName) })
+      : await this.gh.dispatch(this.qualityWorkflow, this.workflowRef, { tag, name: finalName, source_url: u.toString(), qualities: '1' });
     if (r.status !== 204) {
       const error = r.status === 403 || r.status === 401 ? 'github_actions_permission' : r.status === 404 ? 'workflow_not_found' : 'dispatch_failed';
       return { status: 502, body: { ok: false, error, detail: `http ${r.status}` } };
@@ -494,7 +505,24 @@ class UploadService {
     this.dispatchLimiter.set(key, this.now());
     this.log && this.log.info(`upload: import started for ${finalName} by ${user.uid}`);
     return { status: 202, body: { ok: true, started: true, name: finalName, url: this.gh.downloadUrl(tag, finalName),
-      expected: Object.fromEntries(QUALITIES.map(q => [q, this.gh.downloadUrl(tag, qualityName(finalName, q))])) } };
+      locked: !!this.hlsWorkflow, expected: this.expectedUrls(tag, finalName) } };
+  }
+
+  /** Where the three qualities of a video will be: locked HLS playlists on R2, or MP4 copies on the release. */
+  expectedUrls(tag, name) {
+    if (this.hlsWorkflow && this.hlsBase) { const id = hlsId(name); return Object.fromEntries(QUALITIES.map(q => [q, `${this.hlsBase}/lectures/${id}/${q}/index.m3u8`])); }
+    return Object.fromEntries(QUALITIES.map(q => [q, this.gh.downloadUrl(tag, qualityName(name, q))]));
+  }
+
+  /** Locked lecture status: the workflow writes lectures/<id>/info.json last, so its presence (for this source) = ready. */
+  async hlsInfo(name) {
+    if (!this.hlsBase || !this.hlsFetch) return null;
+    try {
+      const r = await this.hlsFetch(`${this.hlsBase}/lectures/${hlsId(name)}/info.json?t=${this.now()}`, { headers: { 'Cache-Control': 'no-cache' } });
+      if (r.status !== 200) return null;
+      const j = await r.json();
+      return j && j.source === name ? j : null;
+    } catch (_) { return null; }
   }
 
   async qualityStatus(name) {
@@ -504,21 +532,28 @@ class UploadService {
     const tag = this.tags.video;
     const releaseId = await this.gh.releaseId(tag);
     const assets = await this.gh.assets(releaseId);
-    const urls = {};
-    for (const q of QUALITIES) {
-      const a = assets.find(x => x.name === qualityName(n, q) && x.state === 'uploaded');
-      if (a) urls[q] = a.browser_download_url || this.gh.downloadUrl(tag, a.name);
+    let urls = {};
+    let info = null;
+    if (this.hlsWorkflow) {
+      info = await this.hlsInfo(n);
+      if (info) urls = this.expectedUrls(tag, n);
+    } else {
+      for (const q of QUALITIES) {
+        const a = assets.find(x => x.name === qualityName(n, q) && x.state === 'uploaded');
+        if (a) urls[q] = a.browser_download_url || this.gh.downloadUrl(tag, a.name);
+      }
     }
     let run = null;
     if (this.qualityWorkflow) {
-      const runs = await this.gh.runs(this.qualityWorkflow);
-      const r = runs.find(x => String(x.display_title || x.name || '').includes(n));
+      const runs = await this.gh.runs(this.hlsWorkflow || this.qualityWorkflow);
+      const r = runs.find(x => String(x.display_title || x.name || '').includes(this.hlsWorkflow ? hlsId(n) : n));
       if (r) run = { status: r.status, conclusion: r.conclusion, url: r.html_url, startedAt: r.run_started_at || r.created_at };
     }
     const orig = assets.find(x => x.name === n && x.state === 'uploaded');
     const ready = QUALITIES.every(q => urls[q]);
     const status = ready ? 'ready' : run ? (run.status === 'completed' ? (run.conclusion === 'success' ? 'partial' : 'failed') : 'running') : 'not_started';
-    return { status: 200, body: { ok: true, name: n, status, original: orig ? (orig.browser_download_url || this.gh.downloadUrl(tag, n)) : null, urls, run } };
+    return { status: 200, body: { ok: true, name: n, status, original: orig ? (orig.browser_download_url || this.gh.downloadUrl(tag, n)) : null, urls, run,
+      locked: !!this.hlsWorkflow, info: info ? { durationSec: info.durationSec, totalBytes: info.totalBytes, bytes: info.bytes } : undefined } };
   }
 }
 
@@ -629,4 +664,4 @@ async function handleUpload(req, res, url, { uploads, auth, adminOrigins, send, 
   return reply(405, { ok: false, error: 'method_not_allowed' });
 }
 
-module.exports = { UploadService, GitHubReleases, handleUpload, safeName, uniqueName, qualityName, MAX_FILE_BYTES, KINDS, QUALITIES };
+module.exports = { hlsId, UploadService, GitHubReleases, handleUpload, safeName, uniqueName, qualityName, MAX_FILE_BYTES, KINDS, QUALITIES };
